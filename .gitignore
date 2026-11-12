@@ -1,0 +1,13 @@
+/.claude-loop/
+/bin/
+/dist/
+/offline-complete
+/artifacts/
+/.agent-test-*/
+/.install-home-*/
+/.gui-data/
+.DS_Store
+/rules/base.bin
+/rules/specs.enc/
+/cache/
+/third_party/node/

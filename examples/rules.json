@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "commands": [
+    {
+      "name": "git",
+      "description": "Distributed version control",
+      "options": [
+        { "name": "--version", "description": "Show version" },
+        { "name": "--help", "description": "Show help" }
+      ],
+      "subcommands": [
+        {
+          "name": "commit",
+          "description": "Record changes",
+          "options": [
+            { "name": "--message", "description": "Commit message" },
+            { "name": "--amend", "description": "Amend the last commit" },
+            { "name": "--all", "description": "Stage tracked changes" }
+          ]
+        },
+        {
+          "name": "status",
+          "description": "Show working tree status",
+          "options": [
+            { "name": "--short", "description": "Short format" },
+            { "name": "--branch", "description": "Show branch information" }
+          ]
+        },
+        {
+          "name": "checkout",
+          "description": "Switch branches or restore files",
+          "options": [
+            { "name": "-b", "description": "Create and switch to a branch" },
+            { "name": "--detach", "description": "Detach HEAD" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "npm",
+      "description": "Node package manager",
+      "subcommands": [
+        { "name": "install", "description": "Install dependencies" },
+        { "name": "test", "description": "Run tests" },
+        { "name": "run", "description": "Run a package script" },
+        { "name": "publish", "description": "Publish the package" }
+      ]
+    },
+    {
+      "name": "docker",
+      "description": "Container runtime",
+      "subcommands": [
+        { "name": "ps", "description": "List containers" },
+        { "name": "images", "description": "List images" },
+        { "name": "run", "description": "Run a container" },
+        { "name": "build", "description": "Build an image" }
+      ]
+    }
+  ]
+}
