@@ -16,7 +16,33 @@ Offline Complete 是一个面向 macOS 的离线终端补全工具。它在 zsh 
 3. 打开应用。首次启动会安装命令行启动器，并在 `~/.zshrc` 顶部写入带标记的自动启动块。
 4. 新开一个 zsh 窗口即可使用；已经打开的终端不会自动接管。
 
-如果系统阻止应用启动，请在 Finder 中右键应用，选择“打开”。
+### 首次启动被 macOS 拦截
+
+出现“Apple 无法验证…”时，这是未公证应用的正常提示。
+
+单次允许：点“完成”，打开“系统设置 → 隐私与安全性”，在“安全性”中点“仍要打开”。
+
+临时允许任何来源：
+
+```bash
+# macOS 15+
+sudo spctl --global-disable
+
+# macOS 14 及更早版本
+sudo spctl --master-disable
+```
+
+然后到“系统设置 → 隐私与安全性 → 允许来自以下来源的应用程序”选择“任何来源”。
+
+恢复默认设置：
+
+```bash
+# macOS 15+
+sudo spctl --global-enable
+
+# macOS 14 及更早版本
+sudo spctl --master-enable
+```
 
 ## 使用
 
