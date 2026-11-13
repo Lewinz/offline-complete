@@ -6,6 +6,9 @@ generators and filesystem templates. The app does not contact the CDN at
 runtime. Raw spec modules are imported locally and executed by the bundled Node
 generator runtime, with AI calls rewritten to OC commands.
 
+The OrbStack `orb` command is maintained locally in `base.json` because it has
+no upstream spec; re-importing the CDN pack must preserve that addition.
+
 - Source: <https://specs.q.us-east-1.amazonaws.com/index.json>
 - Imported: 707 top-level shell commands, about 112,814 static nodes
 - Imported: 5,900 positional argument definitions (including nested commands), 224 allowlisted script
