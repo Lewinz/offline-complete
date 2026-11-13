@@ -66,15 +66,22 @@ func Load(path string) *Store {
 
 // Candidates returns recent unique tokens that start with prefix. Empty
 // prefixes produce no history noise.
+// traversalOnly matches tokens such as "..", "../" and "...": they repeat
+// what the user already typed and should not become selectable suggestions.
+func traversalOnly(token string) bool {
+	return strings.Contains(token, ".") && strings.Trim(token, "./") == ""
+}
+
 func (s *Store) Candidates(prefix string, limit int) []rules.Candidate {
 	if s == nil || prefix == "" || limit <= 0 {
 		return nil
 	}
 	seen := make(map[string]bool)
 	result := make([]rules.Candidate, 0, limit)
+	foldedPrefix := strings.ToLower(prefix)
 	for index := len(s.Entries) - 1; index >= 0; index-- {
 		for _, token := range strings.Fields(s.Entries[index]) {
-			if !strings.HasPrefix(token, prefix) || seen[token] {
+			if traversalOnly(token) || !strings.HasPrefix(strings.ToLower(token), foldedPrefix) || seen[token] {
 				continue
 			}
 			seen[token] = true

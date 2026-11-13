@@ -7,7 +7,7 @@ ifeq ($(strip $(GO)),)
 $(error go toolchain not found; source ~/.g/env or install Go)
 endif
 
-.PHONY: build test test-all vet bin arm64 node-runtime encrypt dist pkg
+.PHONY: build test test-all vet bin arm64 node-runtime encrypt sign dist
 
 build:
 	$(GO) build $(GOFLAGS) ./...
@@ -67,9 +67,18 @@ node-runtime:
 APP_NAME := Offline Complete
 APP := dist/$(APP_NAME).app
 DMG_STAGE := dist/.dmg-stage
+# Release builds pass the tag (without the leading "v") and a numeric build
+# number. Local builds keep a readable development version.
+APP_VERSION ?= 0.1.0
+APP_BUILD ?= 1
+SIGN_IDENTITY ?= Offline Complete Dev
+SIGN_KEYCHAIN ?= $(HOME)/Library/Keychains/offline-complete-dev.keychain-db
 
 encrypt: $(BIN)/encrypt-rules
 	$(BIN)/encrypt-rules rules/base.json rules/base.bin rules/specs rules/specs.enc
+
+sign:
+	OC_SIGN_IDENTITY="$(SIGN_IDENTITY)" OC_SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" scripts/sign-app.sh "$(APP)"
 
 dist: arm64 node-runtime encrypt
 	rm -rf "$(APP)"
@@ -84,14 +93,16 @@ dist: arm64 node-runtime encrypt
 	cp rules/KIRO-SPECS.md "$(APP)/Contents/Resources/RULES-SOURCE.md"
 	cp rules/KIRO-SPECS-LICENSE.MIT "$(APP)/Contents/Resources/licenses/kiro-specs-LICENSE.MIT"
 	cp app/Info.plist "$(APP)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(APP_VERSION)" "$(APP)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(APP_BUILD)" "$(APP)/Contents/Info.plist"
 	cp third_party/creack-pty/LICENSE.MIT "$(APP)/Contents/Resources/licenses/creack-pty-LICENSE.MIT"
 	cp third_party/golang-x-sys/LICENSE "$(APP)/Contents/Resources/licenses/golang-x-sys-LICENSE"
 	cp third_party/golang-x-sys/PATENTS "$(APP)/Contents/Resources/licenses/golang-x-sys-PATENTS"
 	cp third_party/amazon-q/LICENSE.MIT "$(APP)/Contents/Resources/licenses/amazon-q-LICENSE.MIT"
 	cp third_party/amazon-q/LICENSE.APACHE "$(APP)/Contents/Resources/licenses/amazon-q-LICENSE.APACHE"
 	cp third_party/wezterm/LICENSE.MIT "$(APP)/Contents/Resources/licenses/wezterm-LICENSE.MIT"
-	codesign --force --deep --sign - "$(APP)"
-	rm -f "dist/Offline-Complete.zip" "dist/Offline-Complete.dmg" "dist/Offline-Complete.pkg"
+	OC_SIGN_IDENTITY="$(SIGN_IDENTITY)" OC_SIGN_KEYCHAIN="$(SIGN_KEYCHAIN)" scripts/sign-app.sh "$(APP)"
+	rm -f "dist/Offline-Complete.zip" "dist/Offline-Complete.dmg"
 	ditto -c -k --keepParent "$(APP)" "dist/Offline-Complete.zip"
 	rm -rf "$(DMG_STAGE)"
 	mkdir -p "$(DMG_STAGE)"
@@ -100,6 +111,3 @@ dist: arm64 node-runtime encrypt
 	printf '%s\n' 'Offline Complete' '' '1. 把 Offline Complete.app 拖到 Applications。' '2. 打开应用；首次启动会自动安装 ~/.local/bin 命令和 zsh 自动启动块。' '3. 关闭窗口会留在后台继续补全；真正退出应用后自动启动停止。关闭当前终端，新开一个 zsh 窗口即可看到补全。' '' '如果系统阻止未签名应用，右键选择“打开”。' > "$(DMG_STAGE)/安装说明.txt"
 	hdiutil create -volname "$(APP_NAME)" -srcfolder "$(DMG_STAGE)" -ov -format UDZO "dist/Offline-Complete.dmg"
 	rm -rf "$(DMG_STAGE)"
-
-pkg: dist
-	scripts/build-pkg.sh

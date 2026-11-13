@@ -19,10 +19,14 @@ import (
 type SpecStore struct {
 	Dir string
 
-	mu     sync.Mutex
-	index  map[string]string
-	loaded bool
+	mu          sync.Mutex
+	index       map[string]string
+	loaded      bool
+	sources     map[string][]byte
+	sourceBytes int
 }
+
+const maxCachedSpecBytes = 16 << 20
 
 // Load returns the source of one spec module by opaque ID. Identifiers are
 // deliberately restricted to a flat filename component; callers cannot turn a
@@ -95,6 +99,48 @@ func (s *SpecStore) specIndex() (map[string]string, error) {
 }
 
 func (s *SpecStore) loadID(id string) ([]byte, error) {
+	if data, ok := s.cachedSource(id); ok {
+		return data, nil
+	}
+	data, err := s.loadIDUncached(id)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheSource(id, data)
+	return data, nil
+}
+
+func (s *SpecStore) cachedSource(id string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, ok := s.sources[id]
+	if !ok {
+		return nil, false
+	}
+	return append([]byte(nil), data...), true
+}
+
+func (s *SpecStore) cacheSource(id string, data []byte) {
+	if len(data) == 0 || len(data) > maxCachedSpecBytes {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sources == nil {
+		s.sources = make(map[string][]byte)
+	}
+	if previous, ok := s.sources[id]; ok {
+		s.sourceBytes -= len(previous)
+	}
+	if s.sourceBytes+len(data) > maxCachedSpecBytes {
+		s.sources = make(map[string][]byte)
+		s.sourceBytes = 0
+	}
+	s.sources[id] = append([]byte(nil), data...)
+	s.sourceBytes += len(data)
+}
+
+func (s *SpecStore) loadIDUncached(id string) ([]byte, error) {
 	candidates := []string{
 		filepath.Join(s.Dir, id+".bin"),
 		filepath.Join(s.Dir, id+".js"),

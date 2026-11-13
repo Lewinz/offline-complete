@@ -283,6 +283,120 @@ func TestServiceKeyboardNavigationAcceptsSelection(t *testing.T) {
 	}
 }
 
+func TestServiceExactSelectionExecutesTypedLine(t *testing.T) {
+	state := &editstate.State{}
+	if err := state.Update(1, "git commit", 10); err != nil {
+		t.Fatal(err)
+	}
+	var shell bytes.Buffer
+	completion, err := agent.NewSession("session-1", state, testCompleter(), &shell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	offer := readWire(t, reader)
+	if offer.Type != "offer" || len(offer.Items) != 1 || offer.Items[0].Name != "commit" {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if service.Navigate(agent.NavigationAccept) {
+		t.Fatal("exact selection consumed Enter instead of executing the line")
+	}
+	if shell.Len() != 0 {
+		t.Fatalf("exact selection replaced the buffer: %q", shell.String())
+	}
+	if service.HasOffer() {
+		t.Fatal("offer still active after exact execute")
+	}
+	if message := readWire(t, reader); message.Type != "clear" {
+		t.Fatalf("message = %+v", message)
+	}
+}
+
+func TestServiceExactExecuteCanBeDisabled(t *testing.T) {
+	state := &editstate.State{}
+	if err := state.Update(1, "git commit", 10); err != nil {
+		t.Fatal(err)
+	}
+	var shell bytes.Buffer
+	completion, err := agent.NewSession("session-1", state, testCompleter(), &shell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	service.SetExactMatchExecute(false)
+	service.Refresh()
+	if service.Navigate(agent.NavigationAccept) != true {
+		t.Fatal("exact selection was not consumed")
+	}
+	if !strings.HasPrefix(shell.String(), "\x05\x15git commit") {
+		t.Fatalf("shell = %q", shell.String())
+	}
+}
+
+func TestServiceKeepsSelectionAcrossUnchangedRedraw(t *testing.T) {
+	state := &editstate.State{}
+	if err := state.Update(1, "git c", 5); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, twoCandidateCompleter(), &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	service.Refresh()
+	if message := readWire(t, reader); message.Type != "offer" {
+		t.Fatalf("offer = %+v", message)
+	}
+	if !service.Navigate(agent.NavigationNext) {
+		t.Fatal("next was not consumed")
+	}
+	if message := readWire(t, reader); message.Type != "selection" || message.Index != 1 {
+		t.Fatalf("selection = %+v", message)
+	}
+
+	if err := state.Update(2, "git c", 5); err != nil {
+		t.Fatal(err)
+	}
+	service.Refresh()
+	_ = client.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := reader.ReadByte(); err == nil {
+		t.Fatal("unchanged redraw sent a message")
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	if !service.Navigate(agent.NavigationAccept) {
+		t.Fatal("accept after unchanged redraw was not consumed")
+	}
+	if message := readWire(t, reader); message.Type != "result" || !message.OK {
+		t.Fatalf("result = %+v", message)
+	}
+}
+
 func TestServiceDismissHidesTheSameVersion(t *testing.T) {
 	state := &editstate.State{}
 	if err := state.Update(1, "git c", 5); err != nil {

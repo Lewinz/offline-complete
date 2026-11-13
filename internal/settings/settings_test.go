@@ -18,6 +18,12 @@ func TestDefaultsUnderHome(t *testing.T) {
 	if !cfg.Logging.Enabled || cfg.Logging.RetentionDays != 3 {
 		t.Fatalf("defaults = %+v", cfg)
 	}
+	if cfg.Autocomplete.TabAction != "next" || cfg.Autocomplete.EnterAction != "select" || !cfg.Autocomplete.ExactMatchExecute {
+		t.Fatalf("autocomplete defaults = %+v", cfg.Autocomplete)
+	}
+	if !cfg.MenuBar.Enabled {
+		t.Fatal("menu bar should default to enabled")
+	}
 	wantDir := filepath.Join(home, ".oc", "logs")
 	if cfg.Logging.Directory != wantDir {
 		t.Fatalf("directory = %q, want %q", cfg.Logging.Directory, wantDir)
@@ -42,6 +48,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	cfg.Logging.Enabled = false
 	cfg.Logging.Directory = filepath.Join(home, "custom logs")
 	cfg.Logging.RetentionDays = 7
+	cfg.Autocomplete = Autocomplete{TabAction: "accept", EnterAction: "execute", ExactMatchExecute: false}
+	cfg.MenuBar.Enabled = false
 	if err := Save(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +59,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.Logging != cfg.Logging {
 		t.Fatalf("loaded = %+v, want %+v", loaded.Logging, cfg.Logging)
+	}
+	if loaded.Autocomplete != cfg.Autocomplete {
+		t.Fatalf("autocomplete = %+v, want %+v", loaded.Autocomplete, cfg.Autocomplete)
+	}
+	if loaded.MenuBar != cfg.MenuBar {
+		t.Fatalf("menu bar = %+v, want %+v", loaded.MenuBar, cfg.MenuBar)
 	}
 	path, _ := ConfigPath()
 	info, err := os.Stat(path)

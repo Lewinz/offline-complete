@@ -153,3 +153,17 @@ func TestLocalCandidatesUnknownEntryTypes(t *testing.T) {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 }
+
+func TestLocalCandidatesIgnoreCase(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "Alpha"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LocalCandidates(base, "al", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "Alpha" {
+		t.Fatalf("got %#v", got)
+	}
+}

@@ -197,3 +197,28 @@ func TestShellIntegrationFollowsZshrcSymlink(t *testing.T) {
 		t.Fatalf("target = %q", data)
 	}
 }
+
+func TestAutocompleteSettingsCommands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OFFLINE_COMPLETE_CONFIG", "")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"autocomplete", "set", "--tab", "accept", "--enter", "execute", "--exact-match-execute", "off"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("autocomplete set: %d %q", code, stderr.String())
+	}
+	cfg, err := settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Autocomplete.TabAction != "accept" || cfg.Autocomplete.EnterAction != "execute" || cfg.Autocomplete.ExactMatchExecute {
+		t.Fatalf("autocomplete = %+v", cfg.Autocomplete)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"autocomplete", "status"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("autocomplete status: %d %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "tab action: accept") || !strings.Contains(stdout.String(), "enter action: execute") {
+		t.Fatalf("status = %q", stdout.String())
+	}
+}

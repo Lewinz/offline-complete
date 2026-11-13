@@ -125,7 +125,7 @@ func listLocalCandidates(dir *os.File, prefix, pathPrefix string, directoriesOnl
 		}
 		for _, entry := range entries {
 			name := entry.Name()
-			if !strings.HasPrefix(name, prefix) || !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+			if !hasPrefixFold(name, prefix) || !utf8.ValidString(name) || strings.IndexFunc(name, unicode.IsControl) >= 0 {
 				continue
 			}
 			name, ok, err := localCandidateEntry(dir, name, directoriesOnly)

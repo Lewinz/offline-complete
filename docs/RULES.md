@@ -10,6 +10,7 @@
 - 导入 `name`、`description`、`subcommands`、`options`、`args`
 - 原始 spec 模块随包加密；Node generator runtime 执行 `script`、`custom`、`postProcess`、template、cache、trigger 和 fuzzy 过滤
 - 跨 spec 的 `loadSpec`/`generateSpec`、shell history、insertValue 和多参数 option 已接入；OC 的可选 AI generator 在应用“AI 补全”页面启用，仅支持 OpenAI 和 Anthropic；导入时 AI custom generator 的 `fig` 调用已改写为 `oc setting`/`oc ai request`
+- 静态包没有收录的命令（例如 autojump 的 `j` 别名）在运行时通过加密 spec 索引按需加载，不要求出现在 707 条静态命令表中
 - 来源和许可说明见 `rules/KIRO-SPECS.md` 与 `rules/KIRO-SPECS-LICENSE.MIT`
 
 安装后位于：

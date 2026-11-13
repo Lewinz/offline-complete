@@ -62,6 +62,44 @@ func TestCompleterUsesEncryptedSpecWithNodeRuntime(t *testing.T) {
 	}
 }
 
+func TestCompleterCompletesAutojumpAliasJ(t *testing.T) {
+	node := generator.NewNodeRunner()
+	if !node.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer node.Close()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	autojumpDir := filepath.Join(home, "Library", "autojump")
+	if err := os.MkdirAll(autojumpDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := "100\t/Users/example/projects/alpha\n50\t/Users/example/docs/notes\n"
+	if err := os.WriteFile(filepath.Join(autojumpDir, "autojump.txt"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packData, err := rules.LoadFile(filepath.Join("..", "..", "rules", "base.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack, err := rules.FromJSON(packData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := &rules.SpecStore{Dir: filepath.Join("..", "..", "rules", "specs.enc")}
+	node.Specs = specs
+	completer := &agent.Completer{Pack: pack, Grammar: pack.Grammar(), Specs: specs, Generators: &generator.Runner{Node: node}}
+	line := "j al"
+	offer, ok := completer.Complete(editstate.Snapshot{Version: 1, Line: line, Cursor: len(line)})
+	if !ok || len(offer.Candidates) != 1 {
+		t.Fatalf("offer = %+v ok=%v", offer, ok)
+	}
+	candidate := offer.Candidates[0]
+	if candidate.Name != "alpha" || candidate.Description != "/Users/example/projects/alpha" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+}
+
 func TestCompleterLoadsCrossSpecSubcommands(t *testing.T) {
 	node := generator.NewNodeRunner()
 	if !node.Available() {

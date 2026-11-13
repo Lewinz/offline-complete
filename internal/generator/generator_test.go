@@ -32,6 +32,10 @@ func TestTemplateGeneratorsAreBoundedAndFiltered(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "src/" {
 		t.Fatalf("folders = %#v", got)
 	}
+	got = runner.Complete(dir, []rules.Generator{{Template: []string{"filepaths"}}}, "S")
+	if len(got) != 1 || got[0].Name != "src/" {
+		t.Fatalf("case-insensitive filepaths = %#v", got)
+	}
 }
 
 func TestScriptGeneratorRunsAnyCommandInCWD(t *testing.T) {
@@ -42,6 +46,10 @@ func TestScriptGeneratorRunsAnyCommandInCWD(t *testing.T) {
 	got := Runner{}.Complete(dir, []rules.Generator{{Script: []string{"ls"}}}, "a")
 	if len(got) != 1 || got[0].Name != "alpha" {
 		t.Fatalf("ls = %#v", got)
+	}
+	got = Runner{}.Complete(dir, []rules.Generator{{Script: []string{"ls"}}}, "A")
+	if len(got) != 1 || got[0].Name != "alpha" {
+		t.Fatalf("case-insensitive ls = %#v", got)
 	}
 	got = Runner{}.Complete(dir, []rules.Generator{{Script: []string{"sh", "-c", "printf 'from-shell\\n'"}}}, "")
 	if len(got) != 1 || got[0].Name != "from-shell" {

@@ -3,11 +3,18 @@
 ## 1. 构建与测试
 
 ```bash
+make encrypt
 make test-all
 make dist
 ```
 
-`make dist` 使用 `lipo` 生成 arm64+x86_64 通用二进制，产出：
+GitHub Actions 在推送 `v*` tag 时自动构建 Apple Silicon DMG，并创建/更新 GitHub Release。tag 去掉前导 `v` 后通过 `APP_VERSION` 写入 `CFBundleShortVersionString`，例如 `v1.2.3` 会构建 `1.2.3` 并把 DMG 和 SHA-256 校验文件附加到 Release。手动构建可使用：
+
+```bash
+make dist APP_VERSION=1.2.3 APP_BUILD=42
+```
+
+`make dist` 生成 Apple Silicon (arm64) 构建，产出：
 
 ```text
 dist/Offline Complete.app
@@ -15,11 +22,17 @@ dist/Offline-Complete.zip
 dist/Offline-Complete.dmg
 ```
 
-当前使用 ad-hoc 签名：
+开发构建使用本地自签名证书 `Offline Complete Dev`，由 `scripts/sign-app.sh` 创建并签名：
 
 ```bash
-codesign --force --deep --sign - "dist/Offline Complete.app"
+make sign
+# 等价于
+OC_SIGN_IDENTITY="Offline Complete Dev" \
+OC_SIGN_KEYCHAIN="$HOME/Library/Keychains/offline-complete-dev.keychain-db" \
+scripts/sign-app.sh "dist/Offline Complete.app"
 ```
+
+证书首次构建自动生成，密码文件为 `~/Library/Application Support/offline-complete/signing/keychain-password`（0600）。不要提交这份密码或 keychain。自签名证书只解决本机 TCC 权限跨重建保留的问题，不用于对外分发。
 
 ## 2. Developer ID 签名与公证（发布前必须）
 
@@ -71,7 +84,7 @@ scripts/offline-audit.sh
 ## 5. 发布检查清单
 
 - [ ] Developer ID 签名、公证、staple 完成
-- [x] 通用二进制构建（arm64+x86_64）
+- [x] Apple Silicon (arm64) 构建
 - [ ] Intel 真机运行验证
 - [ ] 规则包哈希写入发布清单
 - [x] 第三方许可文件随包（licenses/）

@@ -40,17 +40,43 @@ type AI struct {
 	MaxTokens int    `json:"maxTokens"`
 }
 
+// Autocomplete controls the candidate-window keyboard behavior.
+type Autocomplete struct {
+	TabAction         string `json:"tabAction"`         // next | accept
+	EnterAction       string `json:"enterAction"`       // select | execute
+	ExactMatchExecute bool   `json:"exactMatchExecute"` // Enter on an exact match executes the typed line
+}
+
+// MenuBar controls the background status item.
+type MenuBar struct {
+	Enabled bool `json:"enabled"`
+}
+
 // Config is the complete local settings document.
 type Config struct {
-	SchemaVersion int     `json:"schemaVersion"`
-	Logging       Logging `json:"logging"`
-	AI            AI      `json:"ai"`
+	SchemaVersion int          `json:"schemaVersion"`
+	Logging       Logging      `json:"logging"`
+	AI            AI           `json:"ai"`
+	Autocomplete  Autocomplete `json:"autocomplete"`
+	MenuBar       MenuBar      `json:"menuBar"`
 }
 
 type fileConfig struct {
-	SchemaVersion *int         `json:"schemaVersion"`
-	Logging       *fileLogging `json:"logging"`
-	AI            *fileAI      `json:"ai"`
+	SchemaVersion *int              `json:"schemaVersion"`
+	Logging       *fileLogging      `json:"logging"`
+	AI            *fileAI           `json:"ai"`
+	Autocomplete  *fileAutocomplete `json:"autocomplete"`
+	MenuBar       *fileMenuBar      `json:"menuBar"`
+}
+
+type fileMenuBar struct {
+	Enabled *bool `json:"enabled"`
+}
+
+type fileAutocomplete struct {
+	TabAction         *string `json:"tabAction"`
+	EnterAction       *string `json:"enterAction"`
+	ExactMatchExecute *bool   `json:"exactMatchExecute"`
 }
 
 type fileAI struct {
@@ -107,6 +133,12 @@ func Default() (Config, error) {
 			Protocol:  "openai",
 			MaxTokens: 1024,
 		},
+		Autocomplete: Autocomplete{
+			TabAction:         "next",
+			EnterAction:       "select",
+			ExactMatchExecute: true,
+		},
+		MenuBar: MenuBar{Enabled: true},
 	}, nil
 }
 
@@ -176,6 +208,20 @@ func Load() (Config, error) {
 			cfg.AI.MaxTokens = *raw.AI.MaxTokens
 		}
 	}
+	if raw.Autocomplete != nil {
+		if raw.Autocomplete.TabAction != nil {
+			cfg.Autocomplete.TabAction = *raw.Autocomplete.TabAction
+		}
+		if raw.Autocomplete.EnterAction != nil {
+			cfg.Autocomplete.EnterAction = *raw.Autocomplete.EnterAction
+		}
+		if raw.Autocomplete.ExactMatchExecute != nil {
+			cfg.Autocomplete.ExactMatchExecute = *raw.Autocomplete.ExactMatchExecute
+		}
+	}
+	if raw.MenuBar != nil && raw.MenuBar.Enabled != nil {
+		cfg.MenuBar.Enabled = *raw.MenuBar.Enabled
+	}
 	if err := cfg.Normalize(); err != nil {
 		return defaults, err
 	}
@@ -189,6 +235,18 @@ func (c *Config) Normalize() error {
 	}
 	if c.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported settings schema: %d", c.SchemaVersion)
+	}
+	if c.Autocomplete.TabAction == "" {
+		c.Autocomplete.TabAction = "next"
+	}
+	if c.Autocomplete.EnterAction == "" {
+		c.Autocomplete.EnterAction = "select"
+	}
+	if c.Autocomplete.TabAction != "next" && c.Autocomplete.TabAction != "accept" {
+		return fmt.Errorf("unsupported tab action: %q", c.Autocomplete.TabAction)
+	}
+	if c.Autocomplete.EnterAction != "select" && c.Autocomplete.EnterAction != "execute" {
+		return fmt.Errorf("unsupported enter action: %q", c.Autocomplete.EnterAction)
 	}
 	if c.Logging.RetentionDays == 0 {
 		c.Logging.RetentionDays = DefaultRetentionDays

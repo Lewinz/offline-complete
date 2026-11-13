@@ -54,25 +54,32 @@ func runAgent(rulesPath string, args []string, stdin io.Reader, stdout io.Writer
 }
 
 type agentRuntime struct {
-	listener     *ipc.PrivateListener
-	sessionID    string
-	state        *editstate.State
-	pipeR        *os.File
-	pipeW        *os.File
-	tempDir      string
-	stop         chan struct{}
-	stopOnce     sync.Once
-	accept       chan struct{}
-	mu           sync.Mutex
-	service      *agent.Service
-	base         *lockedWriter
-	navigator    *navigator
-	window       *exec.Cmd
-	generators   *generator.Runner
-	logger       *diag.Logger
-	startedAt    time.Time
-	presencePath string
-	disabled     bool
+	listener          *ipc.PrivateListener
+	sessionID         string
+	state             *editstate.State
+	pipeR             *os.File
+	pipeW             *os.File
+	tempDir           string
+	stop              chan struct{}
+	stopOnce          sync.Once
+	accept            chan struct{}
+	refreshCh         chan struct{}
+	mu                sync.Mutex
+	service           *agent.Service
+	completion        *agent.Session
+	completer         *agent.Completer
+	lastSelection     time.Time
+	base              *lockedWriter
+	navigator         *navigator
+	window            *exec.Cmd
+	generators        *generator.Runner
+	logger            *diag.Logger
+	startedAt         time.Time
+	presencePath      string
+	disabled          bool
+	tabAccept         bool
+	enterExecute      bool
+	exactMatchExecute bool
 }
 
 func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *agentRuntime, err error) {
@@ -118,6 +125,16 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 		logger.Printf("event=generator_specs path=%q", specsDir)
 	} else {
 		logger.Printf("event=generator_specs_unavailable")
+	}
+	if nodeRunner.Available() {
+		go func() {
+			started := time.Now()
+			if err := nodeRunner.Warm(); err != nil {
+				logger.Printf("event=generator_warm_error err=%q", err)
+				return
+			}
+			logger.Printf("event=generator_warmed ms=%.2f", float64(time.Since(started).Microseconds())/1000)
+		}()
 	}
 	completer := &agent.Completer{
 		Pack:       pack,
@@ -218,17 +235,22 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 	}
 
 	runtime = &agentRuntime{
-		listener:   listener,
-		sessionID:  sessionID,
-		state:      &editstate.State{},
-		pipeR:      pipeR,
-		pipeW:      pipeW,
-		tempDir:    tempDir,
-		stop:       make(chan struct{}),
-		accept:     make(chan struct{}),
-		generators: generatorRunner,
-		logger:     logger,
-		startedAt:  time.Now(),
+		listener:          listener,
+		sessionID:         sessionID,
+		state:             &editstate.State{},
+		pipeR:             pipeR,
+		pipeW:             pipeW,
+		tempDir:           tempDir,
+		stop:              make(chan struct{}),
+		accept:            make(chan struct{}),
+		refreshCh:         make(chan struct{}, 1),
+		generators:        generatorRunner,
+		completer:         completer,
+		logger:            logger,
+		startedAt:         time.Now(),
+		tabAccept:         cfg.Autocomplete.TabAction == "accept",
+		enterExecute:      cfg.Autocomplete.EnterAction == "execute",
+		exactMatchExecute: cfg.Autocomplete.ExactMatchExecute,
 	}
 	logger.Printf("event=socket_ready session=%s socket=%q base=%q", sessionID, listener.Path(), base)
 	if os.Getenv("OFFLINE_COMPLETE_AUTO") == "1" {
@@ -237,7 +259,14 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 			go runtime.watchPresence()
 		}
 	}
-	runtime.navigator = &navigator{can: runtime.hasOffer, on: runtime.navigate}
+	runtime.navigator = &navigator{
+		can:          runtime.hasOffer,
+		on:           runtime.navigate,
+		onSubmit:     runtime.recordSubmit,
+		tabAccept:    runtime.tabAccept,
+		enterExecute: runtime.enterExecute,
+	}
+	go runtime.refreshLoop()
 	if os.Getenv("OFFLINE_COMPLETE_NO_WINDOW") == "" {
 		runtime.mu.Lock()
 		disabled := runtime.disabled
@@ -287,6 +316,9 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 		if err != nil {
 			return err
 		}
+		runtime.mu.Lock()
+		runtime.completion = completion
+		runtime.mu.Unlock()
 		if completer.Ranker != nil {
 			completion.SetRecorder(completer.Ranker)
 		}
@@ -390,15 +422,100 @@ func (r *agentRuntime) navigate(action agent.Navigation) bool {
 	if service == nil {
 		return false
 	}
-	return service.Navigate(action)
+	handled := service.Navigate(action)
+	if handled && (action == agent.NavigationAccept || action == agent.NavigationInsert) {
+		r.mu.Lock()
+		r.lastSelection = time.Now()
+		r.mu.Unlock()
+	}
+	return handled
+}
+
+// recordSubmit observes the final line before the shell executes it. It only
+// learns a correction when the user typed a concrete argument instead of
+// accepting an offered candidate; ordinary selections are already recorded by
+// Session.Select.
+func (r *agentRuntime) recordSubmit() {
+	r.mu.Lock()
+	completer := r.completer
+	completion := r.completion
+	lastSelection := r.lastSelection
+	r.mu.Unlock()
+	if completion != nil {
+		if selected := completion.LastSelection(); selected.After(lastSelection) {
+			lastSelection = selected
+		}
+	}
+	if completer == nil || completion == nil || time.Since(lastSelection) < time.Second {
+		return
+	}
+	snapshot, present := r.state.Snapshot()
+	if !present {
+		return
+	}
+	context, ok := completer.Context(snapshot)
+	if !ok || context.InlinePrefix != "" || context.Prefix == "" || context.Prefix == "-" {
+		return
+	}
+	value := context.Prefix
+	rejected := ""
+	if offer, ok := completion.LastOffer(); ok && sameLearningScope(offer.Context, context) {
+		for _, candidate := range offer.Candidates {
+			if strings.EqualFold(candidate.Name, value) ||
+				strings.EqualFold(strings.TrimSuffix(candidate.Name, "/"), value) ||
+				(candidate.InsertValue != "" && strings.EqualFold(candidate.InsertValue, value)) {
+				return
+			}
+		}
+		if len(offer.Candidates) > 0 {
+			rejected = offer.Candidates[0].Name
+		}
+	}
+	recorder, ok := completer.Ranker.(agent.CorrectionRecorder)
+	if !ok {
+		return
+	}
+	recorder.RecordCorrection(context, value, rejected)
+}
+
+func sameLearningScope(left, right shellparse.Context) bool {
+	if left.Command != right.Command || left.Kind != right.Kind || left.Slot != right.Slot ||
+		left.Option != right.Option || left.OptionSlot != right.OptionSlot {
+		return false
+	}
+	if len(left.Subcommands) != len(right.Subcommands) {
+		return false
+	}
+	for index := range left.Subcommands {
+		if left.Subcommands[index] != right.Subcommands[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *agentRuntime) refresh() {
-	r.mu.Lock()
-	service := r.service
-	r.mu.Unlock()
-	if service != nil {
-		service.Refresh()
+	select {
+	case r.refreshCh <- struct{}{}:
+	default:
+		// A refresh is already queued or running. It will read the latest
+		// editing snapshot, so extra wakeups would only add latency.
+	}
+}
+
+func (r *agentRuntime) refreshLoop() {
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-r.refreshCh:
+			r.mu.Lock()
+			service := r.service
+			r.mu.Unlock()
+			if service != nil {
+				service.Refresh()
+			}
+		}
 	}
 }
 
@@ -433,6 +550,7 @@ func (r *agentRuntime) acceptLoop(completion *agent.Session) {
 			continue
 		}
 		service.Logger = r.logger
+		service.SetExactMatchExecute(r.exactMatchExecute)
 		r.logger.Printf("event=interface_connected")
 		r.mu.Lock()
 		previous := r.service

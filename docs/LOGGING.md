@@ -58,7 +58,7 @@ OFFLINE_COMPLETE_LOG_ENABLED=0                # 0/1 覆盖开关
 OFFLINE_COMPLETE_LOG_RETENTION_DAYS=7
 ```
 
-从 Finder/Dock 启动管理窗口时不会继承终端环境；需要这些覆盖时，从终端运行 `oc-app`。
+从 Finder 或菜单栏启动管理窗口时不会继承终端环境；需要这些覆盖时，从终端运行 `oc-app`。
 
 ## 记录内容
 

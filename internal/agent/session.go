@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"offline-complete/internal/completion"
 	"offline-complete/internal/editstate"
@@ -30,13 +31,14 @@ type Session struct {
 	writer    io.Writer
 	recorder  Recorder
 
-	mu          sync.Mutex
-	snapshot    editstate.Snapshot
-	offer       Offer
-	offerID     uint64
-	hasOffer    bool
-	lastVersion uint64
-	haveVersion bool
+	mu            sync.Mutex
+	snapshot      editstate.Snapshot
+	offer         Offer
+	offerID       uint64
+	hasOffer      bool
+	lastVersion   uint64
+	haveVersion   bool
+	lastSelection time.Time
 }
 
 // NewSession binds a shell writer, its editing state and a completer. The
@@ -101,6 +103,17 @@ func (s *Session) Refresh(focused bool) (Offer, uint64, bool) {
 	return offer, offerID, true
 }
 
+// LastOffer returns the most recent candidate list. It is used to attribute a
+// manual submission to the candidate the user chose not to accept.
+func (s *Session) LastOffer() (Offer, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasOffer {
+		return Offer{}, false
+	}
+	return s.offer, true
+}
+
 // Select applies one explicit candidate to the current offer and writes the
 // replacement through the PTY. The offer is consumed even if writing fails;
 // callers must refresh after any error.
@@ -110,6 +123,25 @@ func (s *Session) SetRecorder(recorder Recorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recorder = recorder
+}
+
+// ExactMatch reports whether the selected candidate adds nothing beyond the
+// current token. Kiro treats this case as "insert selected and execute": the
+// shell should receive Enter instead of replacing the word. Keeping the check
+// here means the service can pass Enter through without duplicating the
+// shell's path semantics.
+func (s *Session) ExactMatch(index int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasOffer || index < 0 || index >= len(s.offer.Candidates) {
+		return false
+	}
+	prefix := s.offer.Context.Prefix
+	name := s.offer.Candidates[index].Name
+	if strings.EqualFold(name, prefix) {
+		return true
+	}
+	return strings.HasSuffix(name, "/") && strings.EqualFold(strings.TrimSuffix(name, "/"), prefix)
 }
 
 func (s *Session) Select(version, offer uint64, index int) error {
@@ -138,6 +170,7 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		s.logf("event=select_rejected reason=write candidate=%q err=%q", candidate, err)
 		return err
 	}
+	s.lastSelection = time.Now()
 	if s.recorder != nil {
 		s.recorder.Record(s.offer.Context, candidate)
 	}
@@ -147,6 +180,13 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		s.logf("event=select_applied command=%q subcommands=%q candidate_len=%d", s.offer.Context.Command, strings.Join(s.offer.Context.Subcommands, "/"), len(candidate))
 	}
 	return nil
+}
+
+// LastSelection reports when a candidate was last written into the shell.
+func (s *Session) LastSelection() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSelection
 }
 
 func (s *Session) logf(format string, args ...any) {

@@ -1,0 +1,73 @@
+name: Build Apple Silicon DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build DMG
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify Apple Silicon runner
+        shell: bash
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Build encrypted rules
+        run: make encrypt
+
+      - name: Run tests
+        run: make test
+
+      - name: Build signed DMG
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_BUILD: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          APP_VERSION="${RELEASE_TAG#v}"
+          make dist APP_VERSION="$APP_VERSION" APP_BUILD="$RELEASE_BUILD"
+          codesign --verify --deep --strict "dist/Offline Complete.app"
+          shasum -a 256 dist/Offline-Complete.dmg > dist/Offline-Complete.dmg.sha256
+          echo "version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/Offline Complete.app/Contents/Info.plist')"
+          echo "build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' 'dist/Offline Complete.app/Contents/Info.plist')"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-complete-${{ github.ref_name }}
+          path: |
+            dist/Offline-Complete.dmg
+            dist/Offline-Complete.dmg.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Offline Complete ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/Offline-Complete.dmg
+            dist/Offline-Complete.dmg.sha256

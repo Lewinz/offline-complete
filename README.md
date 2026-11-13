@@ -1,131 +1,191 @@
 # Offline Complete
 
-独立的离线终端补全工具（开发版），目标环境是 macOS + zsh + iTerm2/Terminal。核心用 Go 实现，候选窗口用 AppKit；默认不依赖账号、云服务或运行时网络，只有显式启用 AI generator 时才会访问配置的模型端点。
+Offline Complete 是一个面向 macOS 的离线终端补全工具。它在 zsh 里提供命令、子命令、选项和文件路径补全，并根据你的实际选择和个人纠正逐步调整排序。
 
-## 构建与测试
+- 支持 Apple Silicon Mac，要求 macOS 13+
+- 不需要账号或云服务
+- 静态规则和本地学习都在本机完成
+- 只有主动开启 AI 补全后，才会访问你配置的模型接口
 
-要求 macOS 13+、Xcode Command Line Tools（`swiftc`）、Go 1.27.3（由 `g` 管理在 `~/.g/go`）。依赖已 vendor，构建不需要联网。
+## 下载与安装
 
-```bash
-make test      # 全量测试，vendor 离线
-make vet
-make build     # 编译检查
-make bin       # 生成 bin/ 下的可执行文件
-make dist      # 生成 Apple Silicon .app、.zip、.dmg（ad-hoc 签名）
-make pkg       # 生成可直接双击的系统安装包 .pkg
+从 [GitHub Releases](https://github.com/Lewinz/offline-complete/releases) 下载最新的 `Offline-Complete.dmg`。
+
+1. 打开 DMG。
+2. 把 `Offline Complete.app` 拖到“Applications”。
+3. 打开应用。首次启动会安装命令行启动器，并在 `~/.zshrc` 顶部写入带标记的自动启动块。
+4. 新开一个 zsh 窗口即可使用；已经打开的终端不会自动接管。
+
+如果系统阻止应用启动，请在 Finder 中右键应用，选择“打开”。
+
+## 使用
+
+### 菜单栏与主界面
+
+应用默认在菜单栏常驻，不占用 Dock：
+
+- 点击菜单栏图标可以查看学习指标、打开主界面或退出。
+- 主界面打开时显示 Dock 图标；关闭主界面后回到后台，只保留菜单栏图标。
+- 设置页可以关闭「常驻菜单栏」。关闭后应用恢复普通窗口模式。
+
+主界面包含：
+
+- **开始**：权限和自动补全状态
+- **本地学习**：选择记录和个人纠正
+- **日志**：agent 日志
+- **AI 补全**：可选的模型补全设置
+- **设置**：补全按键、菜单栏、日志、备份
+
+### 补全
+
+在新开的 zsh 窗口中输入命令时，候选会自动出现：
+
+- `↑` / `↓`、`Ctrl-P` / `Ctrl-N`、`Tab`：移动候选
+- `Enter`：插入当前候选
+- `Esc`：关闭候选
+- 鼠标点击候选插入，点击空白关闭
+
+按键行为可以在「设置 → 补全」中修改：
+
+- Tab：下一项 / 选择当前项
+- 回车：选择当前项 / 直接执行命令
+- 精确匹配时直接执行
+
+修改补全设置后，建议新开一个终端窗口。
+
+## 本地学习
+
+Offline Complete 会记录你在补全列表中的选择，用来调整同一上下文下的候选顺序。
+
+当你没有选择候选，而是手动输入了另一个结果时，系统会把它记录为一次“个人纠正”。例如：
+
+```text
+内置候选：Documents/
+你实际输入：Downloads/
 ```
 
-## 安装与运行
+反复纠正后，`Downloads/` 可能在相同命令、子命令和参数位置下成为额外候选；原始静态规则不会被修改，个人结果保存在本地覆盖层中。
 
-### 系统安装包（推荐）
+个人纠正至少需要 **3 次、跨 2 个日期** 才会作为候选生效。学习可以在「本地学习」中关闭或清除。
 
-```bash
-make pkg
-open dist/Offline-Complete.pkg
+## 数据与备份
+
+所有个人数据都在本机：
+
+```text
+~/.oc/
+├── learning.json      # 选择记录和个人纠正
+├── config.json        # 设置、日志设置、AI 设置
+├── learning.json.bak  # 导入学习数据前的备份
+└── logs/              # agent 日志
 ```
 
-安装器会要求管理员密码，把应用装到 `/Applications/Offline Complete.app`，把 `oc`、`oc-app`、`oc-manage`、`oc-window`、`oc-client` 装到 `/usr/local/bin`，并在 `~/.zshrc` 顶部写入一个带标记的自动启动块。**之后新开的交互式 zsh 窗口自动进入 `oc` 补全会话，不需要手动输入 `oc`。** 现有已打开的 shell 不受影响。
+换电脑时，打开「设置 → 数据与备份」，使用「导出备份…」和「导入备份…」。备份是一个 zip 压缩包，包含：
+
+```text
+learning.json
+config.json
+manifest.json
+README.txt
+```
+
+导入前会校验文件哈希，并备份当前数据。备份包含 AI API Key，请按敏感文件保管；日志、规则包和运行中的 socket 不会被打包。
+
+也可以使用命令行：
+
+```bash
+oc-manage backup export --file ~/offline-complete-backup.zip
+oc-manage backup import --file ~/offline-complete-backup.zip
+```
+
+## 隐私
+
+- 默认不联网，只有开启 AI 补全后才会请求你配置的端点。
+- 本地学习不会保存完整命令行、环境变量或命令输出。
+- 个人纠正会保存用户实际提交的 token；它可能包含路径或参数值，因此只保存在本机。
+- 日志默认不记录输入文本或候选名。
+- 可以随时关闭学习、清除数据或在管理窗口中删除日志。
+
+更多细节见 [隐私与本地数据](docs/PRIVACY.md)。
+
+## 常见问题
+
+**看不到应用图标？**
+
+默认应用只在菜单栏常驻。点击菜单栏的 OC 图标打开主界面；关闭主界面后 Dock 图标会消失。也可以执行：
 
 ```bash
 open "/Applications/Offline Complete.app"
-# 新开一个 zsh 窗口，直接输入 git 即可
 ```
 
-`oc` 命令仍然保留，用于显式启动或调试。
+**新终端没有自动补全？**
 
-卸载：
+确认应用正在运行，然后重新打开一个 zsh 窗口。已经打开的终端不会自动切换，可以执行：
 
 ```bash
-sudo scripts/uninstall-pkg.sh
+oc
 ```
 
-### DMG 安装（无需 pkg）
+显式启动一次补全会话。
+
+**没有候选窗口？**
+
+在「开始」页检查辅助功能权限。需要时可以执行：
 
 ```bash
-make dist
-open dist/Offline-Complete.dmg
-# 把 Offline Complete.app 拖到 Applications，然后打开应用
+oc-window --accessibility-prompt
 ```
 
-首次启动时，应用会自动：
+还可用 `oc-manage doctor` 检查安装、规则和 shell 集成状态。
 
-- 安装/更新 `~/.local/bin/oc`、`oc-manage`、`oc-window`、`oc-client`、`oc-app` 启动器；
-- 在 `~/.zshrc` 顶部写入带标记的自动启动块；
-- 之后新开的 zsh 窗口自动进入补全会话。
+**想完全关闭后台行为？**
 
-自动启动只在 Offline Complete 应用运行时生效。关闭主窗口时应用会留在后台，自动补全继续工作；只有真正退出应用（`Cmd+Q` 或菜单“退出 Offline Complete”）后，新终端才不再自动启用，已经运行的自动会话也会同步隐藏补全窗口。显式执行 `oc` 始终可以单独启动一次补全会话。
-
-不需要再执行 `scripts/install.sh`。DMG 里的“安装说明.txt”也有同样步骤。
-
-### 用户级脚本安装
+退出菜单栏应用，或执行：
 
 ```bash
-make dist
-scripts/install.sh      # 安装到 ~/Applications，并生成启动器和 zsh 集成
+oc-manage shell uninstall
 ```
 
-`oc` 仍可用于显式启动。
-
-`oc` 会带上安装包内的规则包启动 zsh，并在同一进程里自动拉起候选窗口。管理窗口有 Dock 图标，可查看规则、学习记录和 agent 日志；候选窗口是独立的非激活面板，不出现在 Dock。卸载：
+## 卸载
 
 ```bash
 scripts/uninstall.sh
 ```
 
-用户级安装和 DMG 首次启动会写入 `~/Applications`（或 `/Applications`）、`~/.local/bin` 启动器和 `~/.zshrc` 顶部的带标记自动启动块；系统安装包对应 `/Applications`、`/usr/local/bin` 和当前控制台用户的 `.zshrc`。都不修改 Kiro 配置。自动启动块可以用 `oc-manage shell uninstall` 移除。
-
-首次使用光标定位时，需要授予辅助功能权限：
+学习数据和日志默认保留。需要一起删除时：
 
 ```bash
-oc-window --accessibility-prompt
-oc-window --print-caret   # 授权后自检
+oc-manage clear --yes
+rm -rf "$HOME/.oc"
 ```
 
-未授权、终端不暴露文本范围或多显示器定位失败时，窗口回退到主屏右上角。
+## 开发与发布
 
-## 交互
-
-- `↑` / `↓`、`Ctrl-P` / `Ctrl-N`、`Tab`：移动高亮
-- `Enter`：插入当前候选，不会执行命令
-- `Esc`：关闭候选
-- 鼠标点击候选插入，点击空白关闭
-
-键盘导航由 agent 在 PTY 输入路径拦截，不抢终端焦点；没有候选时按键原样转发给 zsh。插入使用 emacs 键位（Ctrl-E / Ctrl-U），拒绝含控制字符的整行重写。
-
-## 管理与隐私
+需要 macOS 13+、Xcode Command Line Tools、Go 1.27.3 和 vendor 依赖。
 
 ```bash
-open "$HOME/Applications/Offline Complete.app"   # 图形管理窗口
-oc-manage status
-oc-manage learning off        # 关闭后不再记录或排序
-oc-manage learning on
-oc-manage clear --yes         # 删除全部本地选择记录
-oc-manage logging status      # 日志开关、目录、保留天数
-oc-manage logging off         # 运行中的 oc 在下一次日志事件停止写入
-oc-manage logging set --enabled on --directory "$HOME/.oc/logs" --retention-days 3
-oc-manage shell status        # 新 zsh 窗口自动启动状态
-oc-manage shell install       # 写入/恢复 ~/.zshrc 标记块
-oc-manage shell uninstall     # 移除标记块
-oc-manage doctor              # 检查数据目录、规则、窗口、Kiro 共存
+make encrypt       # 首次从源码构建时生成加密规则包
+make test          # 测试
+make bin           # 生成 bin/ 下的开发二进制
+make dist          # 生成 Apple Silicon .app / .zip / .dmg
 ```
 
-管理窗口的“规则”页显示命令/子命令/选项树，“学习”页显示选择记录并可开关学习或清除，“日志”页实时显示并切换保留期内的日志，“设置”页可开关日志、修改目录和保留天数。规则页只读，用户覆盖和建议管理仍未实现。
-
-学习数据在 `~/Library/Application Support/offline-complete/learning.json`，目录 0700、文件 0600，只保存“命令/子命令/选项或槽位/候选名”的计数和最后选择时间；不保存完整命令行、参数值、路径、环境变量或输出。超过 90 天的记录会被清理。
-
-agent 日志默认在 `~/.oc/logs/agent-YYYY-MM-DD.log`（目录 0700、文件 0600，保留 3 个自然日，单文件超过 2 MB 时下次打开轮转）。默认只记录启动、规则/学习状态、补全候选数量、选择和错误，不记录输入文本或候选名；本地调试可设 `OFFLINE_COMPLETE_LOG_TEXT=1`，它会把输入行和候选名写入日志，调试后请关闭。日志开关、目录和保留天数可在管理窗口“设置”页或 `oc-manage logging` 修改。详见 [日志](docs/LOGGING.md)。
-
-## 开发调试
-
-不用安装，也可以手动跑两个终端：
+发布构建支持传入版本号：
 
 ```bash
-OFFLINE_COMPLETE_RULES=rules/base.json bin/offline-complete zsh -i
-# offline-complete: session=... socket=...
-bin/oc-window -socket <path> -session <id>
+make dist APP_VERSION=1.2.3 APP_BUILD=42
 ```
 
-`bin/oc-client` 是终端版候选替代品；`bin/oc-window --check` 只验证 socket 协议。测试时可用 `OFFLINE_COMPLETE_NO_WINDOW=1` 禁止自动拉起窗口。
+`APP_VERSION` 会写入 `CFBundleShortVersionString`，主界面左下角显示为 `v1.2.3`。
+
+`make dist` 首次运行会创建本地自签名证书 `Offline Complete Dev`。正式发布使用 GitHub Actions：推送 `v*` tag 会构建 Apple Silicon DMG，并把 DMG 和 SHA-256 校验文件附加到 GitHub Release。
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+发布构建会把 tag 去掉前导 `v` 后写入 `CFBundleShortVersionString`；主界面左下角显示的版本号来自应用 Info.plist。
 
 ## 文档
 
@@ -136,10 +196,3 @@ bin/oc-window -socket <path> -session <id>
 - [已知限制](docs/LIMITATIONS.md)
 - [发布、签名与离线审计](docs/RELEASE.md)
 - [兼容性矩阵](docs/COMPATIBILITY.md)
-- 实施计划：`docs/superpowers/plans/2026-11-10-offline-completion.md`
-
-## 当前状态
-
-已经能跑通：zsh 编辑状态采集、静态规则候选、键盘/鼠标选择、安全整行插入、光标跟随（需 Accessibility）、私有 IPC、学习排序、管理 CLI、AppKit 管理窗口（规则/学习/日志）、`.app`/`.dmg` 打包和安装脚本。
-
-仍是开发版：未用 Developer ID 签名/公证，未在干净 VM 做离线审计，未做 iTerm2/Terminal 真机矩阵；仅支持 Apple Silicon；学习存储用版本化 JSON 而非设计中的 SQLite，管理窗口没有用户覆盖和建议操作。详见 [已知限制](docs/LIMITATIONS.md)。

@@ -50,6 +50,11 @@ type nodeResponse struct {
 	Error      string            `json:"error,omitempty"`
 }
 
+type nodeLine struct {
+	line []byte
+	err  error
+}
+
 // NodeRunner executes Kiro/Fig generator modules through a single long-lived
 // Node process. It is safe for concurrent use; requests are serialized because
 // the wire protocol is one request per line.
@@ -57,7 +62,8 @@ type NodeRunner struct {
 	mu          sync.Mutex
 	cmd         *exec.Cmd
 	stdin       io.WriteCloser
-	stdout      *bufio.Reader
+	lines       chan nodeLine
+	readerDone  chan struct{}
 	runtimePath string
 	tempDir     string
 	nextID      uint64
@@ -122,21 +128,6 @@ func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
 		return nil, fmt.Errorf("write generator request: %w", err)
 	}
 
-	type lineResult struct {
-		line []byte
-		err  error
-	}
-	lines := make(chan lineResult, 1)
-	go func() {
-		for {
-			line, err := r.stdout.ReadBytes('\n')
-			lines <- lineResult{line: line, err: err}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	timeout := r.timeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -145,7 +136,7 @@ func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
 	defer timer.Stop()
 	for {
 		select {
-		case value := <-lines:
+		case value := <-r.lines:
 			if value.err != nil {
 				r.stopLocked()
 				return nil, value.err
@@ -191,6 +182,48 @@ func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
 	}
 }
 
+// Warm starts the Node process before the first completion request. Process
+// startup and first-exec verification are the expensive part of a cold
+// session; keeping it off the user's first keystroke removes the visible delay.
+func (r *NodeRunner) Warm() error {
+	if r == nil {
+		return errors.New("nil node runner")
+	}
+	r.mu.Lock()
+	if err := r.ensureLocked(); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	r.mu.Unlock()
+	// A started process is not necessarily ready; a trivial request forces the
+	// runtime to import and answer before the first real completion arrives.
+	_, err := r.Complete(NodeRequest{
+		Source:  `export default {name:"warm"}`,
+		Command: "warm",
+		Kind:    "load",
+	})
+	if err != nil {
+		return err
+	}
+	// Import the specs most likely to be hit first. This is intentionally only
+	// module loading: no generator runs and no user file data is read.
+	for _, name := range []string{"cd", "git", "ls", "docker", "kubectl", "j"} {
+		if r.Specs == nil {
+			break
+		}
+		source, loadErr := r.Specs.LoadName(name)
+		if loadErr != nil {
+			continue
+		}
+		_, _ = r.Complete(NodeRequest{
+			Source:  string(source),
+			Command: name,
+			Kind:    "load",
+		})
+	}
+	return nil
+}
+
 func (r *NodeRunner) ensureLocked() error {
 	if r.cmd != nil && r.cmd.Process != nil {
 		return nil
@@ -234,13 +267,34 @@ func (r *NodeRunner) ensureLocked() error {
 		_ = stdout.Close()
 		return fmt.Errorf("start node generator: %w", err)
 	}
+	reader := bufio.NewReaderSize(stdout, 64*1024)
+	lines := make(chan nodeLine, 8)
+	done := make(chan struct{})
 	r.cmd = cmd
 	r.stdin = stdin
-	r.stdout = bufio.NewReaderSize(stdout, 64*1024)
+	r.lines = lines
+	r.readerDone = done
+	go func() {
+		for {
+			line, err := reader.ReadBytes('\n')
+			select {
+			case lines <- nodeLine{line: line, err: err}:
+			case <-done:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 	return nil
 }
 
 func (r *NodeRunner) stopLocked() {
+	if r.readerDone != nil {
+		close(r.readerDone)
+		r.readerDone = nil
+	}
 	if r.stdin != nil {
 		_ = r.stdin.Close()
 	}
@@ -250,7 +304,7 @@ func (r *NodeRunner) stopLocked() {
 	}
 	r.cmd = nil
 	r.stdin = nil
-	r.stdout = nil
+	r.lines = nil
 }
 
 func findNode() (string, error) {

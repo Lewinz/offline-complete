@@ -1,7 +1,9 @@
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Darwin
 import Foundation
+import IOKit.hid
 
 func writeError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -12,6 +14,7 @@ func writeError(_ message: String) {
 struct Item: Codable {
     let name: String
     let description: String?
+    let path: String?
 }
 
 struct WindowMessage: Codable {
@@ -255,15 +258,19 @@ final class AgentConnection {
 
 final class CaretLocator {
     private let application: AXUIElement
+    private let trusted: Bool
 
     init(pid: pid_t) {
         application = AXUIElementCreateApplication(pid)
+        // TCC's trust check can take tens of milliseconds. Checking it on every
+        // popup added a visible delay even when the permission was denied.
+        trusted = AXIsProcessTrusted()
     }
 
     /// Returns the caret rectangle in Cocoa screen coordinates, or nil when
     /// the focused element does not expose an accessibility text range.
     func rect() -> NSRect? {
-        guard AXIsProcessTrusted() else { return nil }
+        guard trusted else { return nil }
         var focusedValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
               let focusedValue else {
@@ -317,21 +324,42 @@ func requestAccessibility() -> Bool {
 
 final class CandidateView: NSView {
     var items: [Item] = [] {
-        didSet { needsDisplay = true }
+        didSet {
+            firstVisibleRow = 0
+            needsDisplay = true
+        }
     }
     var onSelect: ((Int) -> Void)?
     var onDismiss: (() -> Void)?
     var selected = 0 {
-        didSet { needsDisplay = true }
+        didSet {
+            updateViewport()
+            needsDisplay = true
+        }
     }
     private var hovered = -1
+    private var firstVisibleRow = 0
+    private lazy var nameFont = NSFont(name: "Monaco", size: 12.8) ?? NSFont.monospacedSystemFont(ofSize: 12.8, weight: .regular)
+    private lazy var selectedFont = NSFont(name: "Monaco-Bold", size: 12.8) ?? NSFont.monospacedSystemFont(ofSize: 12.8, weight: .semibold)
+    private lazy var descriptionFont: NSFont = {
+        let base = NSFont.systemFont(ofSize: 11.5)
+        let italic = base.fontDescriptor.withSymbolicTraits(.italic)
+        return NSFont(descriptor: italic, size: 11.5) ?? base
+    }()
+    private lazy var shortcutFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
+    private var symbolCache: [String: NSImage] = [:]
 
-    let rowHeight: CGFloat = 20
+    let rowHeight: CGFloat = 22
     let verticalPadding: CGFloat = 4
-    let horizontalPadding: CGFloat = 8
+    let horizontalPadding: CGFloat = 9
     let maximumRows = 7
-    let panelWidth: CGFloat = 320
-    let descriptionHeight: CGFloat = 24
+    let minimumPanelWidth: CGFloat = 400
+    let maximumPanelWidth: CGFloat = 560
+    let descriptionHeight: CGFloat = 22
+    let iconSize: CGFloat = 14
+    let iconLeading: CGFloat = 10
+    let textLeading: CGFloat = 32
+    let shortcutWidth: CGFloat = 30
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { false }
@@ -340,26 +368,38 @@ final class CandidateView: NSView {
         let background: NSColor
         let text: NSColor
         let descriptionText: NSColor
+        let descriptionBackground: NSColor
         let border: NSColor
         let selectedBackground: NSColor
         let selectedText: NSColor
+        let selectedIcon: NSColor
+        let icon: NSColor
+        let shortcut: NSColor
 
         static let light = Palette(
             background: NSColor(srgbRed: 254 / 255, green: 254 / 255, blue: 254 / 255, alpha: 1),
             text: NSColor(srgbRed: 7 / 255, green: 7 / 255, blue: 7 / 255, alpha: 1),
-            descriptionText: NSColor(srgbRed: 7 / 255, green: 7 / 255, blue: 7 / 255, alpha: 1),
+            descriptionText: NSColor(srgbRed: 70 / 255, green: 70 / 255, blue: 75 / 255, alpha: 1),
+            descriptionBackground: NSColor(srgbRed: 244 / 255, green: 244 / 255, blue: 246 / 255, alpha: 1),
             border: NSColor(srgbRed: 199 / 255, green: 199 / 255, blue: 199 / 255, alpha: 1),
             selectedBackground: NSColor(srgbRed: 41 / 255, green: 105 / 255, blue: 218 / 255, alpha: 1),
-            selectedText: NSColor(srgbRed: 253 / 255, green: 253 / 255, blue: 253 / 255, alpha: 1)
+            selectedText: NSColor(srgbRed: 253 / 255, green: 253 / 255, blue: 253 / 255, alpha: 1),
+            selectedIcon: NSColor(srgbRed: 210 / 255, green: 230 / 255, blue: 255 / 255, alpha: 1),
+            icon: NSColor(srgbRed: 41 / 255, green: 105 / 255, blue: 218 / 255, alpha: 1),
+            shortcut: NSColor(srgbRed: 120 / 255, green: 120 / 255, blue: 126 / 255, alpha: 1)
         )
 
         static let dark = Palette(
-            background: NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 48 / 255, alpha: 1),
-            text: NSColor(srgbRed: 180 / 255, green: 180 / 255, blue: 180 / 255, alpha: 1),
-            descriptionText: NSColor(srgbRed: 180 / 255, green: 180 / 255, blue: 180 / 255, alpha: 1),
-            border: NSColor(srgbRed: 65 / 255, green: 65 / 255, blue: 65 / 255, alpha: 1),
-            selectedBackground: NSColor(srgbRed: 30 / 255, green: 90 / 255, blue: 199 / 255, alpha: 1),
-            selectedText: NSColor(srgbRed: 253 / 255, green: 253 / 255, blue: 253 / 255, alpha: 1)
+            background: NSColor(srgbRed: 45 / 255, green: 45 / 255, blue: 45 / 255, alpha: 1),
+            text: NSColor(srgbRed: 184 / 255, green: 184 / 255, blue: 184 / 255, alpha: 1),
+            descriptionText: NSColor(srgbRed: 174 / 255, green: 174 / 255, blue: 178 / 255, alpha: 1),
+            descriptionBackground: NSColor(srgbRed: 54 / 255, green: 54 / 255, blue: 54 / 255, alpha: 1),
+            border: NSColor(srgbRed: 78 / 255, green: 78 / 255, blue: 78 / 255, alpha: 1),
+            selectedBackground: NSColor(srgbRed: 35 / 255, green: 111 / 255, blue: 224 / 255, alpha: 1),
+            selectedText: NSColor(srgbRed: 253 / 255, green: 253 / 255, blue: 253 / 255, alpha: 1),
+            selectedIcon: NSColor(srgbRed: 190 / 255, green: 217 / 255, blue: 255 / 255, alpha: 1),
+            icon: NSColor(srgbRed: 96 / 255, green: 165 / 255, blue: 250 / 255, alpha: 1),
+            shortcut: NSColor(srgbRed: 150 / 255, green: 150 / 255, blue: 154 / 255, alpha: 1)
         )
     }
 
@@ -370,29 +410,82 @@ final class CandidateView: NSView {
         .dark
     }
 
+    private var widthCache: [String: CGFloat] = [:]
+
+    private func textWidth(_ text: String, font: NSFont) -> CGFloat {
+        let size = String(format: "%.1f", font.pointSize)
+        let key = "\(font.fontName)|\(size)|\(text)"
+        if let cached = widthCache[key] {
+            return cached
+        }
+        let width = (text as NSString).size(withAttributes: [.font: font]).width
+        if widthCache.count > 1024 {
+            widthCache.removeAll(keepingCapacity: true)
+        }
+        widthCache[key] = width
+        return width
+    }
+
+    func warmup() {
+        _ = nameFont
+        _ = selectedFont
+        _ = descriptionFont
+        _ = shortcutFont
+        _ = textWidth("M", font: nameFont)
+        _ = textWidth("M", font: descriptionFont)
+    }
+
     func preferredSize(count: Int) -> NSSize {
         let rows = min(max(count, 1), maximumRows)
+        let visible = items.prefix(maximumRows)
+        let nameWidth = visible.map { textWidth($0.name, font: nameFont) }.max() ?? 0
+        let descriptionWidth = visible
+            .compactMap { $0.description }
+            .map { textWidth($0, font: descriptionFont) }
+            .max() ?? 0
+        let contentWidth = max(nameWidth, descriptionWidth)
+        let width = min(
+            maximumPanelWidth,
+            max(minimumPanelWidth, horizontalPadding * 2 + textLeading + contentWidth + shortcutWidth)
+        )
         return NSSize(
-            width: panelWidth,
+            width: width,
             height: CGFloat(rows) * rowHeight + verticalPadding * 2 + descriptionHeight
         )
     }
 
     private var selectedDescription: String? {
         guard items.indices.contains(selected) else { return nil }
+        if let path = items[selected].path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            return path
+        }
         let value = items[selected].description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? nil : value
     }
 
-    private var firstVisible: Int {
+    private var firstVisible: Int { firstVisibleRow }
+
+    private func updateViewport() {
         let rows = min(items.count, maximumRows)
+        guard rows > 0 else {
+            firstVisibleRow = 0
+            return
+        }
+        // Keep the viewport stable while the selection moves inside it. Only
+        // scroll when the selection reaches the top or bottom edge.
+        if selected < firstVisibleRow {
+            firstVisibleRow = selected
+        } else if selected >= firstVisibleRow + rows {
+            firstVisibleRow = selected - rows + 1
+        }
         let maxOffset = max(0, items.count - rows)
-        return min(max(0, selected), maxOffset)
+        firstVisibleRow = min(max(0, firstVisibleRow), maxOffset)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let colors = palette
-        let background = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
+        let outer = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let background = NSBezierPath(roundedRect: outer, xRadius: 7, yRadius: 7)
         colors.background.setFill()
         background.fill()
         colors.border.setStroke()
@@ -401,8 +494,6 @@ final class CandidateView: NSView {
 
         let nameStyle = NSMutableParagraphStyle()
         nameStyle.lineBreakMode = .byTruncatingTail
-        let regularFont = NSFont(name: "Monaco", size: 12.8) ?? NSFont.monospacedSystemFont(ofSize: 12.8, weight: .regular)
-        let selectedFont = NSFont(name: "Monaco-Bold", size: 12.8) ?? NSFont.monospacedSystemFont(ofSize: 12.8, weight: .semibold)
 
         let visible = min(items.count, maximumRows)
         let first = firstVisible
@@ -415,50 +506,129 @@ final class CandidateView: NSView {
                 height: rowHeight
             )
             if index == selected {
-                let highlight = NSBezierPath(roundedRect: row.insetBy(dx: 4, dy: 1), xRadius: 4, yRadius: 4)
+                let highlight = NSBezierPath(roundedRect: row.insetBy(dx: 4, dy: 0), xRadius: 4, yRadius: 4)
                 colors.selectedBackground.setFill()
                 highlight.fill()
             } else if index == hovered {
-                let highlight = NSBezierPath(roundedRect: row.insetBy(dx: 4, dy: 1), xRadius: 4, yRadius: 4)
+                let highlight = NSBezierPath(roundedRect: row.insetBy(dx: 4, dy: 0), xRadius: 4, yRadius: 4)
                 colors.selectedBackground.withAlphaComponent(0.28).setFill()
                 highlight.fill()
             }
+
+            let iconColor = index == selected ? colors.selectedIcon : colors.icon
+            if let image = symbolImage(for: items[index], color: iconColor) {
+                let iconRect = NSRect(
+                    x: iconLeading,
+                    y: row.minY + (rowHeight - iconSize) / 2,
+                    width: iconSize,
+                    height: iconSize
+                )
+                image.draw(
+                    in: iconRect,
+                    from: .zero,
+                    operation: .sourceOver,
+                    fraction: 1,
+                    respectFlipped: true,
+                    hints: nil
+                )
+            }
+
             let nameAttributes: [NSAttributedString.Key: Any] = [
-                .font: index == selected ? selectedFont : regularFont,
+                .font: index == selected ? selectedFont : nameFont,
                 .foregroundColor: index == selected ? colors.selectedText : colors.text,
                 .paragraphStyle: nameStyle,
             ]
-            let nameRect = NSRect(x: horizontalPadding, y: row.minY + 3, width: row.maxX - horizontalPadding * 2, height: 15)
+            let nameRect = NSRect(
+                x: textLeading,
+                y: row.minY + 4,
+                width: row.maxX - textLeading - horizontalPadding,
+                height: 15
+            )
             (items[index].name as NSString).draw(in: nameRect, withAttributes: nameAttributes)
         }
 
         let dividerY = verticalPadding + CGFloat(visible) * rowHeight
+        NSGraphicsContext.saveGraphicsState()
+        background.addClip()
+        colors.descriptionBackground.setFill()
+        NSRect(x: outer.minX, y: dividerY, width: outer.width, height: bounds.height - dividerY - 0.5).fill()
         let divider = NSBezierPath()
-        divider.move(to: NSPoint(x: 4, y: dividerY))
-        divider.line(to: NSPoint(x: bounds.width - 4, y: dividerY))
+        divider.move(to: NSPoint(x: outer.minX, y: dividerY + 0.5))
+        divider.line(to: NSPoint(x: outer.maxX, y: dividerY + 0.5))
         colors.border.setStroke()
         divider.lineWidth = 1
         divider.stroke()
+        NSGraphicsContext.restoreGraphicsState()
 
+        let descriptionStyle = NSMutableParagraphStyle()
+        descriptionStyle.lineBreakMode = .byTruncatingTail
+        let descriptionAttributes: [NSAttributedString.Key: Any] = [
+            .font: descriptionFont,
+            .foregroundColor: colors.descriptionText,
+            .paragraphStyle: descriptionStyle,
+        ]
         if let description = selectedDescription {
-            let baseFont = NSFont.systemFont(ofSize: 11.5)
-            let italic = baseFont.fontDescriptor.withSymbolicTraits(.italic)
-            let descriptionFont = NSFont(descriptor: italic, size: 11.5) ?? baseFont
-            let descriptionStyle = NSMutableParagraphStyle()
-            descriptionStyle.lineBreakMode = .byTruncatingTail
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: descriptionFont,
-                .foregroundColor: colors.descriptionText,
-                .paragraphStyle: descriptionStyle,
-            ]
             let descriptionRect = NSRect(
                 x: horizontalPadding,
                 y: dividerY + 4,
-                width: bounds.width - horizontalPadding * 2,
+                width: bounds.width - horizontalPadding * 2 - shortcutWidth - 6,
                 height: 16
             )
-            (description as NSString).draw(in: descriptionRect, withAttributes: attributes)
+            (description as NSString).draw(in: descriptionRect, withAttributes: descriptionAttributes)
         }
+
+        let shortcutStyle = NSMutableParagraphStyle()
+        shortcutStyle.alignment = .right
+        let shortcutAttributes: [NSAttributedString.Key: Any] = [
+            .font: shortcutFont,
+            .foregroundColor: colors.shortcut,
+            .paragraphStyle: shortcutStyle,
+        ]
+        let shortcutRect = NSRect(
+            x: bounds.width - horizontalPadding - shortcutWidth,
+            y: dividerY + 5,
+            width: shortcutWidth,
+            height: 15
+        )
+        ("↑↓" as NSString).draw(in: shortcutRect, withAttributes: shortcutAttributes)
+    }
+
+    private func symbolName(for item: Item) -> String {
+        let description = (item.description ?? "").lowercased()
+        if description.contains("目录") || description.contains("folder") ||
+            description.hasPrefix("/") || item.name.hasSuffix("/") {
+            return "folder.fill"
+        }
+        if description.contains("文件") || description.contains("file") {
+            return "doc.fill"
+        }
+        if description.contains("分支") || description.contains("branch") {
+            return "arrow.triangle.branch"
+        }
+        if description.contains("历史") || description.contains("history") {
+            return "clock.arrow.circlepath"
+        }
+        if item.name.hasPrefix("-") {
+            return "slider.horizontal.3"
+        }
+        return "terminal"
+    }
+
+    private func symbolImage(for item: Item, color: NSColor) -> NSImage? {
+        let name = symbolName(for: item)
+        let key = name + "|" + color.description
+        if let cached = symbolCache[key] {
+            return cached
+        }
+        let configuration = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
+        let configured = image?.withSymbolConfiguration(configuration)
+        if let configured {
+            symbolCache[key] = configured
+        }
+        return configured
     }
 
     override func updateTrackingAreas() {
@@ -533,6 +703,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var items: [Item] = []
     private var suppressOffersUntil = Date.distantPast
     private var caretLocator: CaretLocator?
+    private var terminalPID: pid_t?
+    private var focused = true
 
     init(socket: String, session: String, origin: NSPoint?) {
         self.socketPath = socket
@@ -542,8 +714,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let terminal = NSWorkspace.shared.frontmostApplication {
+            terminalPID = terminal.processIdentifier
             caretLocator = CaretLocator(pid: terminal.processIdentifier)
         }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(applicationActivated(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         panel = CandidatePanel(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 100),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -554,6 +733,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
+        panel.animationBehavior = .none
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
@@ -563,6 +743,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.onSelect = { [weak self] index in self?.select(index) }
         view.onDismiss = { [weak self] in self?.dismiss() }
         panel.contentView = view
+        view.warmup()
+        // Keep the transparent overlay ordered in upfront. Toggling alpha is
+        // much cheaper than a first orderFront for every new completion.
+        panel.alphaValue = 0
+        panel.ignoresMouseEvents = true
+        panel.orderFrontRegardless()
 
         do {
             let connection = try AgentConnection(path: socketPath, session: session)
@@ -573,6 +759,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             writeError("oc-window: \(error)")
             NSApp.terminate(nil)
+        }
+    }
+
+    @objc private func applicationActivated(_ notification: Notification) {
+        guard let active = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+        // The candidate panel is a nonactivating overlay. If AppKit ever
+        // reports it as active, keep the terminal session focused.
+        if active.processIdentifier == getpid() {
+            return
+        }
+        setFocused(active.processIdentifier == terminalPID)
+    }
+
+    private func setFocused(_ value: Bool) {
+        guard value != focused else { return }
+        focused = value
+        connection?.send(["type": "focus", "focused": value])
+        if !value {
+            hide()
         }
     }
 
@@ -632,13 +839,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 y: min(max(chosen.minY, screen.minY), screen.maxY - size.height)
             )
         }
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
-        panel.orderFrontRegardless()
+        let frame = NSRect(origin: origin, size: size)
+        if panel.frame.size != frame.size {
+            panel.setFrame(frame, display: false)
+        } else if panel.frame.origin != frame.origin {
+            panel.setFrameOrigin(frame.origin)
+        }
+        if !panel.isVisible {
+            panel.orderFrontRegardless()
+        }
+        panel.alphaValue = 1
+        panel.ignoresMouseEvents = false
         view.needsDisplay = true
     }
 
     private func hide() {
-        panel.orderOut(nil)
+        panel.alphaValue = 0
+        panel.ignoresMouseEvents = true
     }
 
     private func select(_ index: Int) {
@@ -705,6 +922,7 @@ var socketPath = ""
 var session = ""
 var check = false
 var accessibilityPrompt = false
+var permissionStatus = false
 var printCaret = false
 var origin: NSPoint?
 var index = 1
@@ -730,6 +948,8 @@ while index < CommandLine.arguments.count {
         check = true
     case "--accessibility-prompt":
         accessibilityPrompt = true
+    case "--permission-status":
+        permissionStatus = true
     case "--print-caret":
         printCaret = true
     default:
@@ -743,6 +963,16 @@ if accessibilityPrompt {
     let trusted = requestAccessibility()
     print(trusted ? "accessibility: granted" : "accessibility: prompt requested")
     exit(trusted ? 0 : 1)
+}
+
+if permissionStatus {
+    let accessibility = AXIsProcessTrusted()
+    let inputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    let screenRecording = CGPreflightScreenCaptureAccess()
+    print("accessibility: \(accessibility ? "granted" : "denied")")
+    print("input-monitoring: \(inputMonitoring ? "granted" : "denied")")
+    print("screen-recording: \(screenRecording ? "granted" : "denied")")
+    exit(0)
 }
 
 if printCaret {
@@ -759,7 +989,7 @@ if printCaret {
 }
 
 guard !socketPath.isEmpty, !session.isEmpty else {
-    writeError("usage: oc-window --socket PATH --session ID [--x X --y Y] [--check] [--print-caret]")
+    writeError("usage: oc-window --socket PATH --session ID [--x X --y Y] [--check] [--print-caret] [--permission-status] [--accessibility-prompt]")
     exit(2)
 }
 

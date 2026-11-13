@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+import SwiftUI
 
 // MARK: - Paths and small helpers
 
@@ -19,6 +20,12 @@ enum AppPaths {
 
     static var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
+    static var displayVersion: String {
+        let value = appVersion
+        if value == "dev" { return "开发版" }
+        return value.hasPrefix("v") ? value : "v\(value)"
     }
 
     static var rulesURL: URL? {
@@ -56,7 +63,16 @@ enum AppPaths {
         return home.appendingPathComponent("Library/Application Support/offline-complete")
     }
 
-    static var learningURL: URL { dataDir.appendingPathComponent("learning.json") }
+    static var ocDir: URL {
+        if let value = environment["OFFLINE_COMPLETE_DATA_DIR"], !value.isEmpty {
+            return URL(fileURLWithPath: value)
+        }
+        return home.appendingPathComponent(".oc")
+    }
+
+    static var learningURL: URL { ocDir.appendingPathComponent("learning.json") }
+    static var legacyLearningURL: URL { dataDir.appendingPathComponent("learning.json") }
+    static var backupURL: URL { ocDir.appendingPathComponent("offline-complete-backup.zip") }
 
     static var configURL: URL {
         if let value = environment["OFFLINE_COMPLETE_CONFIG"], !value.isEmpty {
@@ -117,6 +133,13 @@ struct AISettings {
     var error: String?
 }
 
+struct AutocompleteSettings {
+    var tabAction: String
+    var enterAction: String
+    var exactMatchExecute: Bool
+    var error: String?
+}
+
 func loadAISettings() -> AISettings {
     var result = AISettings(enabled: false, protocolName: "openai", url: "", key: "", model: "", maxTokens: 1024, error: nil)
     let config = AppPaths.configURL
@@ -147,6 +170,48 @@ func loadAISettings() -> AISettings {
         result.maxTokens = 1024
     }
     return result
+}
+
+func loadAutocompleteSettings() -> AutocompleteSettings {
+    var result = AutocompleteSettings(
+        tabAction: "next",
+        enterAction: "select",
+        exactMatchExecute: true,
+        error: nil
+    )
+    let config = AppPaths.configURL
+    guard let data = try? Data(contentsOf: config) else { return result }
+    do {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(domain: "oc", code: 1, userInfo: [NSLocalizedDescriptionKey: "不是 JSON 对象"])
+        }
+        if let autocomplete = root["autocomplete"] as? [String: Any] {
+            result.tabAction = autocomplete["tabAction"] as? String ?? result.tabAction
+            result.enterAction = autocomplete["enterAction"] as? String ?? result.enterAction
+            result.exactMatchExecute = autocomplete["exactMatchExecute"] as? Bool ?? result.exactMatchExecute
+        }
+    } catch {
+        result.error = error.localizedDescription
+    }
+    if result.tabAction != "next" && result.tabAction != "accept" {
+        result.error = result.error ?? "不支持的 Tab 操作：\(result.tabAction)"
+        result.tabAction = "next"
+    }
+    if result.enterAction != "select" && result.enterAction != "execute" {
+        result.error = result.error ?? "不支持的回车操作：\(result.enterAction)"
+        result.enterAction = "select"
+    }
+    return result
+}
+
+func loadMenuBarSetting() -> Bool {
+    let config = AppPaths.configURL
+    guard let data = try? Data(contentsOf: config),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let menuBar = root["menuBar"] as? [String: Any] else {
+        return true
+    }
+    return menuBar["enabled"] as? Bool ?? true
 }
 
 func logDateString(_ date: Date = Date()) -> String {
@@ -453,141 +518,6 @@ final class KiroSwitch: NSControl {
     }
 }
 
-final class KiroSidebarItem: NSView {
-    var isSelected = false {
-        didSet { updateAppearance() }
-    }
-    var onClick: (() -> Void)?
-    private let iconView = NSImageView()
-    private let label = NSTextField(labelWithString: "")
-    private var hovered = false
-
-    init(title: String, symbol: String) {
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 7
-        layer?.masksToBounds = true
-        iconView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-        iconView.imageScaling = .scaleProportionallyDown
-        iconView.translatesAutoresizingMaskIntoConstraints = false
-        label.stringValue = title
-        label.font = .systemFont(ofSize: 14, weight: .medium)
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(iconView)
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            iconView.widthAnchor.constraint(equalToConstant: 19),
-            iconView.heightAnchor.constraint(equalToConstant: 19),
-            label.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        updateAppearance()
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: 40) }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        // The point is expressed in the superview's coordinates. Let AppKit
-        // resolve the subviews (icon/label), then route the whole item to this
-        // view so mouseDown fires even when the click lands on the label.
-        super.hitTest(point) == nil ? nil : self
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        ))
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        hovered = true
-        updateAppearance()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        hovered = false
-        updateAppearance()
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
-
-    private func updateAppearance() {
-        if isSelected {
-            layer?.backgroundColor = KiroTheme.accent.cgColor
-            iconView.contentTintColor = .white
-            label.textColor = .white
-        } else {
-            layer?.backgroundColor = (hovered ? NSColor(srgbRed: 0.95, green: 0.95, blue: 0.96, alpha: 1) : NSColor.clear).cgColor
-            iconView.contentTintColor = NSColor(srgbRed: 0.42, green: 0.42, blue: 0.45, alpha: 1)
-            label.textColor = KiroTheme.title
-        }
-        iconView.needsDisplay = true
-    }
-}
-
-final class KiroInfoRow: NSView {
-    let valueLabel = NSTextField(labelWithString: "")
-
-    init(title: String, detail: String) {
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        let titleLabel = kiroTitle(title)
-        let detailLabel = kiroBody(detail)
-        detailLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.maximumNumberOfLines = 1
-        valueLabel.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        valueLabel.alignment = .right
-        valueLabel.lineBreakMode = .byTruncatingTail
-        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
-        valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let textStack = NSStackView(views: [titleLabel, detailLabel])
-        textStack.orientation = .vertical
-        textStack.alignment = .leading
-        textStack.spacing = 2
-        textStack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(textStack)
-        addSubview(valueLabel)
-        valueLabel.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            textStack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            textStack.topAnchor.constraint(equalTo: topAnchor),
-            textStack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: valueLabel.leadingAnchor, constant: -16),
-            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            valueLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
-            valueLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 46),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func setStatus(_ text: String, color: NSColor = KiroTheme.muted) {
-        valueLabel.stringValue = text
-        valueLabel.textColor = color
-    }
-}
-
-func kiroSidebarHeader(_ text: String) -> NSTextField {
-    let label = makeLabel(text, size: 12.5, weight: .semibold)
-    label.textColor = KiroTheme.muted
-    return label
-}
-
 func formatBytes(_ bytes: Int) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
 }
@@ -621,6 +551,52 @@ func runTool(_ name: String, _ arguments: [String]) -> (Int32, String) {
     return (process.terminationStatus, String(decoding: data, as: UTF8.self))
 }
 
+
+// MARK: - System permissions
+
+// Permissions are granted to the candidate-window binary, not to the
+// management window, so ask oc-window instead of calling AXIsProcessTrusted()
+// in this process.
+struct WindowPermissionStatus {
+    var accessibility: Bool?
+    var inputMonitoring: Bool?
+    var screenRecording: Bool?
+
+    static func load() -> WindowPermissionStatus {
+        guard AppPaths.tool("oc-window") != nil else { return WindowPermissionStatus() }
+        let (code, output) = runTool("oc-window", ["--permission-status"])
+        guard code == 0 else { return WindowPermissionStatus() }
+        var result = WindowPermissionStatus()
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            let granted = parts[1].trimmingCharacters(in: .whitespaces) == "granted"
+            switch key {
+            case "accessibility": result.accessibility = granted
+            case "input-monitoring": result.inputMonitoring = granted
+            case "screen-recording": result.screenRecording = granted
+            default: break
+            }
+        }
+        return result
+    }
+}
+
+func requestWindowAccessibility() {
+    guard AppPaths.tool("oc-window") != nil else {
+        showAlert("找不到 oc-window", "请重新安装 Offline Complete。")
+        return
+    }
+    _ = runTool("oc-window", ["--accessibility-prompt"])
+}
+
+func openPrivacyPane(_ anchor: String) {
+    guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else {
+        return
+    }
+    NSWorkspace.shared.open(url)
+}
 
 func shellQuote(_ value: String) -> String {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
@@ -890,10 +866,22 @@ struct LearningEntry {
     let last: Date?
 }
 
+struct PersonalRule {
+    let context: String
+    let candidate: String
+    let wins: UInt64
+    let losses: UInt64
+    let days: Int
+    let confidence: Double
+    let eligible: Bool
+    let last: Date?
+}
+
 struct LearningSnapshot {
     let path: String
     let learning: Bool
     let entries: [LearningEntry]
+    let personal: [PersonalRule]
     let bytes: Int
     let error: String?
 }
@@ -916,14 +904,55 @@ func parseDate(_ value: String) -> Date? {
     return nil
 }
 
+func isParentToken(_ value: String) -> Bool {
+    var normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if normalized.hasSuffix("/") {
+        normalized.removeLast()
+    }
+    return normalized == ".."
+}
+
+func learningContext(parts: [String]) -> String? {
+    guard parts.count >= 4 else { return nil }
+    let kind: String
+    switch parts[2] {
+    case "opt": kind = "选项"
+    case "sub": kind = "子命令"
+    case "pos": kind = "位置"
+    default: kind = parts[2]
+    }
+    var context = parts[0]
+    if !parts[1].isEmpty {
+        context += " " + parts[1].replacingOccurrences(of: "/", with: " ")
+    }
+    context += " · \(kind)"
+    if parts[2] == "pos" {
+        context += " #\(parts[3])"
+    }
+    return context
+}
+
+func wilsonLower(wins: UInt64, losses: UInt64, z: Double = 1.645) -> Double {
+    let total = Double(wins + losses)
+    guard total > 0 else { return 0 }
+    let probability = Double(wins) / total
+    let z2 = z * z
+    let denominator = 1 + z2 / total
+    let center = probability + z2 / (2 * total)
+    let margin = z * sqrt(probability * (1 - probability) / total + z2 / (4 * total * total))
+    return min(1, max(0, (center - margin) / denominator))
+}
+
 func loadLearning() -> LearningSnapshot {
-    let url = AppPaths.learningURL
+    let primary = AppPaths.learningURL
+    let legacy = AppPaths.legacyLearningURL
+    let url = FileManager.default.fileExists(atPath: primary.path) ? primary : legacy
     guard let data = try? Data(contentsOf: url) else {
-        return LearningSnapshot(path: url.path, learning: true, entries: [], bytes: 0, error: nil)
+        return LearningSnapshot(path: primary.path, learning: true, entries: [], personal: [], bytes: 0, error: nil)
     }
     do {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return LearningSnapshot(path: url.path, learning: true, entries: [], bytes: data.count, error: "学习数据不是 JSON 对象")
+            return LearningSnapshot(path: url.path, learning: true, entries: [], personal: [], bytes: data.count, error: "学习数据不是 JSON 对象")
         }
         let learning = root["learning"] as? Bool ?? true
         let selections = root["selections"] as? [String: Any] ?? [:]
@@ -932,472 +961,991 @@ func loadLearning() -> LearningSnapshot {
         for (key, raw) in selections {
             guard let selection = raw as? [String: Any] else { continue }
             let parts = key.components(separatedBy: "\0")
-            guard parts.count >= 5 else { continue }
-            let command = parts[0]
-            let subcommands = parts[1]
-            let kindCode = parts[2]
-            let slot = parts[3]
-            let candidate = parts[4]
-            let kind: String
-            switch kindCode {
-            case "opt": kind = "选项"
-            case "sub": kind = "子命令"
-            case "pos": kind = "位置"
-            default: kind = kindCode
-            }
-            var context = command
-            if !subcommands.isEmpty {
-                context += " " + subcommands.replacingOccurrences(of: "/", with: " ")
-            }
-            context += " · \(kind)"
-            if kindCode == "pos" {
-                context += " #\(slot)"
-            }
+            guard parts.count >= 5, !isParentToken(parts[4]), let context = learningContext(parts: parts) else { continue }
             let count = (selection["count"] as? NSNumber)?.uint64Value ?? 0
             let last = (selection["last"] as? String).flatMap(parseDate)
-            entries.append(LearningEntry(context: context, candidate: candidate, count: count, last: last))
+            entries.append(LearningEntry(context: context, candidate: parts[4], count: count, last: last))
         }
         entries.sort {
             if $0.count != $1.count { return $0.count > $1.count }
             return ($0.last ?? .distantPast) > ($1.last ?? .distantPast)
         }
-        return LearningSnapshot(path: url.path, learning: learning, entries: entries, bytes: data.count, error: nil)
+
+        let corrections = root["corrections"] as? [String: Any] ?? [:]
+        var personal: [PersonalRule] = []
+        for (key, rawValues) in corrections {
+            guard let values = rawValues as? [String: Any] else { continue }
+            let parts = key.components(separatedBy: "\0")
+            guard let context = learningContext(parts: parts) else { continue }
+            for (candidate, raw) in values {
+                guard !isParentToken(candidate), let correction = raw as? [String: Any] else { continue }
+                let wins = (correction["wins"] as? NSNumber)?.uint64Value ?? 0
+                let losses = (correction["losses"] as? NSNumber)?.uint64Value ?? 0
+                let days = (correction["days"] as? [String])?.count ?? 0
+                let last = (correction["last"] as? String).flatMap(parseDate)
+                personal.append(PersonalRule(
+                    context: context,
+                    candidate: candidate,
+                    wins: wins,
+                    losses: losses,
+                    days: days,
+                    confidence: wilsonLower(wins: wins, losses: losses),
+                    eligible: wins >= 3 && days >= 2,
+                    last: last
+                ))
+            }
+        }
+        personal.sort {
+            if $0.eligible != $1.eligible { return $0.eligible && !$1.eligible }
+            if $0.confidence != $1.confidence { return $0.confidence > $1.confidence }
+            return $0.wins > $1.wins
+        }
+        return LearningSnapshot(path: url.path, learning: learning, entries: entries, personal: personal, bytes: data.count, error: nil)
     } catch {
-        return LearningSnapshot(path: url.path, learning: true, entries: [], bytes: data.count, error: error.localizedDescription)
+        return LearningSnapshot(path: url.path, learning: true, entries: [], personal: [], bytes: data.count, error: error.localizedDescription)
     }
+}
+
+extension Notification.Name {
+    static let menuBarSettingChanged = Notification.Name("OfflineCompleteMenuBarSettingChanged")
 }
 
 // MARK: - Overview
 
-final class OverviewPanel: NSObject {
-    let view = NSView()
-    private let autoRow = KiroInfoRow(title: "自动补全", detail: "关闭窗口会留在后台；退出应用后停止")
-    private let rulesRow = KiroInfoRow(title: "规则", detail: "离线补全规则")
-    private let learningRow = KiroInfoRow(title: "学习", detail: "本机选择记录")
-    private let logRow = KiroInfoRow(title: "日志", detail: "agent 运行日志")
-    private let scroll: NSScrollView
-    private let text: NSTextView
-    private let copyButton: KiroButton
+// MARK: - SwiftUI shell
 
-    override init() {
-        view.frame = NSRect(x: 0, y: 0, width: 840, height: 732)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = KiroTheme.background.cgColor
-        (scroll, text) = makeTextScroll()
-        copyButton = KiroButton(title: "复制 oc 命令", style: .primary, target: nil, action: nil)
-        super.init()
-        copyButton.target = self
-        copyButton.action = #selector(copyCommand(_:))
+final class AppShellModel: ObservableObject {
+    @Published var selected = "overview"
+    @Published var refreshToken = 0
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 16
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: KiroTheme.contentInset),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -KiroTheme.contentInset),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 34),
-        ])
+    func refreshAll() { refreshToken &+= 1 }
+}
 
-        let intro = kiroBody("Offline Complete 在本机提供离线 CLI 补全，不依赖账号或网络。")
-        intro.preferredMaxLayoutWidth = 680
-        stack.addArrangedSubview(kiroSectionTitle("概览"))
-        stack.addArrangedSubview(intro)
-        stack.setCustomSpacing(22, after: intro)
+struct AppShellView: View {
+    @ObservedObject var model: AppShellModel
 
-        let statusHeader = kiroSectionTitle("状态")
-        stack.addArrangedSubview(statusHeader)
-        stack.setCustomSpacing(6, after: statusHeader)
-        for row in [autoRow, rulesRow, learningRow, logRow] {
-            stack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    private let items: [(String, String, String)] = [
+        ("overview", "开始", "paintbrush.pointed"),
+        ("learning", "本地学习", "wand.and.stars"),
+        ("logs", "日志", "doc.text.magnifyingglass"),
+        ("ai", "AI 补全", "sparkles"),
+        ("settings", "设置", "gearshape"),
+    ]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            content
+                .id(model.refreshToken)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-
-        let pathHeader = kiroSectionTitle("路径")
-        stack.setCustomSpacing(22, after: logRow)
-        stack.addArrangedSubview(pathHeader)
-        stack.setCustomSpacing(6, after: pathHeader)
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(scroll)
-        scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: 138).isActive = true
-
-        let actions = NSStackView()
-        actions.orientation = .horizontal
-        actions.spacing = 10
-        actions.alignment = .centerY
-        actions.addArrangedSubview(makeButton("刷新", target: self, action: #selector(refreshAction)))
-        actions.addArrangedSubview(copyButton)
-        actions.addArrangedSubview(makeButton("打开数据目录", target: self, action: #selector(openData)))
-        actions.addArrangedSubview(makeButton("打开日志目录", target: self, action: #selector(openLogs)))
-        stack.setCustomSpacing(20, after: scroll)
-        stack.addArrangedSubview(actions)
-        for button in actions.arrangedSubviews {
-            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
-        }
-        refresh()
+        .background(Color(nsColor: KiroTheme.background))
     }
 
-    func refresh() {
-        let rules = loadRules()
-        let learning = loadLearning()
-        let log = loadLogSettings()
-        let zshrc = AppPaths.home.appendingPathComponent(".zshrc")
-        let autoStart = (try? String(contentsOf: zshrc, encoding: .utf8))?
-            .contains("# offline-complete integration v2") ?? false
-        let marker = AppPaths.dataDir.appendingPathComponent("app.pid")
-        var appRunning = false
-        if let value = try? String(contentsOf: marker, encoding: .utf8),
-           let pid = Int32(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            appRunning = kill(pid, 0) == 0
-        }
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("功能")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Color(nsColor: KiroTheme.muted))
+                .padding(.horizontal, 12)
+                .padding(.top, 24)
+                .padding(.bottom, 4)
+            ForEach(items.prefix(3), id: \.0) { item in sidebarButton(item) }
 
-        if appRunning {
-            autoRow.setStatus("运行中", color: NSColor.systemGreen)
-        } else if autoStart {
-            autoRow.setStatus("等待应用", color: KiroTheme.muted)
-        } else {
-            autoRow.setStatus("未启用", color: KiroTheme.muted)
-        }
-        if let error = rules.error {
-            rulesRow.setStatus("加载失败", color: NSColor.systemRed)
-            rulesRow.toolTip = error
-        } else {
-            rulesRow.setStatus("已加载", color: NSColor.systemGreen)
-        }
-        if learning.learning {
-            learningRow.setStatus("已启用", color: NSColor.systemGreen)
-        } else {
-            learningRow.setStatus("已关闭", color: KiroTheme.muted)
-        }
-        logRow.setStatus(log.enabled ? "已启用" : "已关闭", color: log.enabled ? NSColor.systemGreen : KiroTheme.muted)
-        if log.enabled {
-            logRow.toolTip = log.directory.path
-        }
+            Text("设置")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Color(nsColor: KiroTheme.muted))
+                .padding(.horizontal, 12)
+                .padding(.top, 18)
+                .padding(.bottom, 4)
+            ForEach(items.suffix(2), id: \.0) { item in sidebarButton(item) }
 
-        var paths: [String] = []
-        paths.append("应用\t\(Bundle.main.bundleURL.path)")
-        paths.append("规则\t\(rules.path.isEmpty ? "未找到" : rules.path)")
-        paths.append("数据\t\(AppPaths.dataDir.path)")
-        paths.append("套接字\t\(AppPaths.socketBase.path)")
-        paths.append("日志\t\(log.currentURL.path)")
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.tabStops = [NSTextTab(textAlignment: .left, location: 88, options: [:])]
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
-            .foregroundColor: KiroTheme.title,
-            .paragraphStyle: paragraph,
-        ]
-        text.textStorage?.setAttributedString(NSAttributedString(
-            string: paths.joined(separator: "\n"),
-            attributes: attributes
-        ))
-        text.scrollToBeginningOfDocument(nil)
+            Spacer()
+            Text(AppPaths.displayVersion)
+                .font(.system(size: 10))
+                .foregroundColor(Color(nsColor: KiroTheme.muted))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 16)
+        }
+        .frame(width: 220)
+        .background(Color(nsColor: KiroTheme.background))
     }
 
-    @objc private func refreshAction() {
-        refresh()
+    private func sidebarButton(_ item: (String, String, String)) -> some View {
+        Button {
+            model.selected = item.0
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: item.2)
+                    .frame(width: 16)
+                Text(item.1)
+                    .font(.system(size: 13))
+                Spacer()
+            }
+            .foregroundColor(model.selected == item.0 ? .white : Color(nsColor: KiroTheme.title))
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(model.selected == item.0 ? Color(nsColor: KiroTheme.accent) : .clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .contentShape(Rectangle())
     }
 
-    @objc private func openData() {
-        try? FileManager.default.createDirectory(
-            at: AppPaths.dataDir,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        NSWorkspace.shared.open(AppPaths.dataDir)
-    }
-
-    @objc private func openLogs() {
-        let directory = loadLogSettings().directory
-        try? FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        NSWorkspace.shared.open(directory)
-    }
-
-    @objc private func copyCommand(_ sender: KiroButton) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("oc", forType: .string)
-        sender.setDisplayTitle("已复制")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            sender.setDisplayTitle("复制 oc 命令")
+    private var content: some View {
+        ZStack {
+            OverviewView()
+                .opacity(model.selected == "overview" ? 1 : 0)
+                .allowsHitTesting(model.selected == "overview")
+            LearningView()
+                .opacity(model.selected == "learning" ? 1 : 0)
+                .allowsHitTesting(model.selected == "learning")
+            LogsView(active: model.selected == "logs")
+                .opacity(model.selected == "logs" ? 1 : 0)
+                .allowsHitTesting(model.selected == "logs")
+            AISettingsView()
+                .opacity(model.selected == "ai" ? 1 : 0)
+                .allowsHitTesting(model.selected == "ai")
+            SettingsView(model: model)
+                .opacity(model.selected == "settings" ? 1 : 0)
+                .allowsHitTesting(model.selected == "settings")
         }
     }
 }
 
-// MARK: - Rules panel
+struct SettingsView: View {
+    @ObservedObject var model: AppShellModel
+    @State private var tabAction: String
+    @State private var enterAction: String
+    @State private var exactMatch: Bool
+    @State private var logEnabled: Bool
+    @State private var logDirectory: String
+    @State private var retention: Int
+    @State private var menuBar: Bool
+    @State private var message: String?
+    @State private var isError = false
 
-final class RulesPanel: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
-    let view = NSView()
-    private let summary = makeLabel("", size: 12.5)
-    private let outline = NSOutlineView()
-    private var commands: [RuleNode] = []
-
-    override init() {
-        view.frame = NSRect(x: 0, y: 0, width: 840, height: 732)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = KiroTheme.background.cgColor
-        super.init()
-        let title = kiroSectionTitle("CLI 补全")
-        title.frame = NSRect(x: KiroTheme.contentInset, y: 664, width: 400, height: 24)
-        title.autoresizingMask = [.minYMargin]
-        view.addSubview(title)
-        summary.frame = NSRect(x: KiroTheme.contentInset, y: 638, width: 740, height: 18)
-        summary.autoresizingMask = [.width, .minYMargin]
-        summary.textColor = KiroTheme.muted
-        summary.lineBreakMode = .byTruncatingTail
-        view.addSubview(summary)
-
-        let name = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
-        name.title = "规则"
-        name.width = 300
-        let detail = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("detail"))
-        detail.title = "说明"
-        detail.width = 440
-        outline.addTableColumn(name)
-        outline.addTableColumn(detail)
-        outline.outlineTableColumn = name
-        outline.headerView = nil
-        outline.rowHeight = 30
-        outline.indentationPerLevel = 16
-        outline.usesAlternatingRowBackgroundColors = false
-        outline.backgroundColor = .clear
-        outline.gridStyleMask = []
-        outline.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        outline.focusRingType = .none
-        outline.dataSource = self
-        outline.delegate = self
-
-        let scroll = NSScrollView()
-        scroll.frame = NSRect(x: KiroTheme.contentInset, y: 70, width: 760, height: 550)
-        scroll.autoresizingMask = [.width, .height]
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 8
-        scroll.layer?.borderWidth = 1
-        scroll.layer?.borderColor = KiroTheme.border.cgColor
-        outline.autoresizingMask = [.width]
-        scroll.documentView = outline
-        view.addSubview(scroll)
-
-        let refresh = makeButton("刷新", target: self, action: #selector(refreshAction))
-        refresh.frame = NSRect(x: KiroTheme.contentInset, y: 22, width: 86, height: 32)
-        refresh.autoresizingMask = [.maxYMargin]
-        view.addSubview(refresh)
+    init(model: AppShellModel) {
+        self.model = model
+        let keys = loadAutocompleteSettings()
+        let logs = loadLogSettings()
+        _tabAction = State(initialValue: keys.tabAction)
+        _enterAction = State(initialValue: keys.enterAction)
+        _exactMatch = State(initialValue: keys.exactMatchExecute)
+        _logEnabled = State(initialValue: logs.enabled)
+        _logDirectory = State(initialValue: logs.directory.path)
+        _retention = State(initialValue: logs.retentionDays)
+        _menuBar = State(initialValue: loadMenuBarSetting())
     }
 
-    func refresh() {
-        let snapshot = loadRules()
-        commands = snapshot.commands
-        if let error = snapshot.error {
-            summary.stringValue = "规则加载失败：\(error)  \(snapshot.path)"
-            summary.textColor = .systemRed
-        } else {
-            summary.stringValue = "\(snapshot.topCount) 个命令 · \(snapshot.total) 条规则 · sha256 \(snapshot.sha)"
-            summary.textColor = KiroTheme.muted
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("设置")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(Color(nsColor: KiroTheme.title))
+
+                settingsCard("补全") {
+                    fieldRow("Tab") {
+                        Picker("", selection: $tabAction) {
+                            Text("下一项").tag("next")
+                            Text("选择当前项").tag("accept")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 220)
+                    }
+                    fieldRow("回车") {
+                        Picker("", selection: $enterAction) {
+                            Text("选择当前项").tag("select")
+                            Text("直接执行命令").tag("execute")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 240)
+                    }
+                    Toggle("精确匹配时直接执行", isOn: $exactMatch)
+                        .disabled(enterAction == "execute")
+                }
+
+                settingsCard("日志") {
+                    Toggle("写入 agent 日志", isOn: $logEnabled)
+                    HStack(spacing: 12) {
+                        Text("目录")
+                            .frame(width: 44, alignment: .leading)
+                        TextField("~/.oc/logs", text: $logDirectory)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    HStack(spacing: 12) {
+                        Text("保留")
+                            .frame(width: 44, alignment: .leading)
+                        Picker("", selection: $retention) {
+                            ForEach([1, 3, 7, 14, 30], id: \.self) { days in
+                                Text("\(days) 天").tag(days)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 120)
+                    }
+                }
+
+                settingsCard("菜单栏") {
+                    Toggle("常驻菜单栏", isOn: $menuBar)
+                        .onChange(of: menuBar) { value in setMenuBar(value) }
+                    Text("后台运行时从菜单栏打开主界面和查看学习指标。")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: KiroTheme.muted))
+                }
+
+                settingsCard("数据与备份") {
+                    Text("包含本地学习、个人纠正和设置（含 AI Key）。不包含日志、规则包和运行数据。")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: KiroTheme.muted))
+                    HStack(spacing: 10) {
+                        Button("导出备份…") { exportBackup() }
+                        Button("导入备份…") { importBackup() }
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    Button("保存") { save() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color(nsColor: KiroTheme.accent))
+                    if let message {
+                        Text(message)
+                            .font(.system(size: 12))
+                            .foregroundColor(isError ? .red : Color(nsColor: KiroTheme.muted))
+                    }
+                }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 34)
+            .frame(maxWidth: 720, alignment: .leading)
         }
-        outline.reloadData()
-        // The full Kiro import has hundreds of top-level commands and tens of
-        // thousands of descendants. Expanding everything would make the view
-        // unresponsive; small packs keep the old convenience behavior.
-        if commands.count < 100 {
-            for command in commands {
-                outline.expandItem(command, expandChildren: true)
+        .background(Color(nsColor: KiroTheme.background))
+    }
+
+    private func settingsCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color(nsColor: KiroTheme.muted))
+            content()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: KiroTheme.surface))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(nsColor: KiroTheme.border), lineWidth: 1)
+                )
+        )
+    }
+
+    private func fieldRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 16) {
+            Text(title)
+                .frame(width: 44, alignment: .leading)
+            content()
+            Spacer()
+        }
+    }
+
+    private func save() {
+        let (keyCode, keyOutput) = runTool("oc-manage", [
+            "autocomplete", "set",
+            "--tab", tabAction,
+            "--enter", enterAction,
+            "--exact-match-execute", exactMatch ? "on" : "off",
+        ])
+        if keyCode != 0 {
+            message = keyOutput.isEmpty ? "保存按键设置失败" : keyOutput
+            isError = true
+            return
+        }
+        let (logCode, logOutput) = runTool("oc-manage", [
+            "logging", "set",
+            "--enabled", logEnabled ? "on" : "off",
+            "--directory", logDirectory,
+            "--retention-days", String(retention),
+        ])
+        if logCode != 0 {
+            message = logOutput.isEmpty ? "保存日志设置失败" : logOutput
+            isError = true
+            return
+        }
+        message = "已保存"
+        isError = false
+    }
+
+    private func exportBackup() {
+        let panel = NSSavePanel()
+        panel.title = "导出完整备份"
+        panel.nameFieldStringValue = AppPaths.backupURL.lastPathComponent
+        panel.allowedFileTypes = ["zip"]
+        if FileManager.default.fileExists(atPath: AppPaths.ocDir.path) {
+            panel.directoryURL = AppPaths.ocDir
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let (code, output) = runTool("oc-manage", ["backup", "export", "--file", url.path])
+        if code != 0 {
+            message = output.isEmpty ? "导出备份失败" : output
+            isError = true
+            return
+        }
+        message = "备份已导出"
+        isError = false
+    }
+
+    private func importBackup() {
+        let panel = NSOpenPanel()
+        panel.title = "导入完整备份"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedFileTypes = ["zip"]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let alert = NSAlert()
+        alert.messageText = "恢复这个备份？"
+        alert.informativeText = "会替换当前学习数据和设置（含 AI Key）；导入前会备份当前数据，失败时尽量恢复。"
+        alert.addButton(withTitle: "恢复")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let (code, output) = runTool("oc-manage", ["backup", "import", "--file", url.path])
+        if code != 0 {
+            message = output.isEmpty ? "导入备份失败" : output
+            isError = true
+            return
+        }
+        reloadSettings()
+        NotificationCenter.default.post(name: .menuBarSettingChanged, object: nil)
+        message = "备份已恢复"
+        isError = false
+        model.refreshAll()
+    }
+
+    private func setMenuBar(_ value: Bool) {
+        let (code, output) = runTool("oc-manage", ["menu-bar", value ? "on" : "off"])
+        if code != 0 {
+            message = output.isEmpty ? "修改菜单栏设置失败" : output
+            isError = true
+            menuBar = !value
+            return
+        }
+        NotificationCenter.default.post(name: .menuBarSettingChanged, object: nil)
+        message = value ? "菜单栏已开启" : "菜单栏已关闭"
+        isError = false
+    }
+
+    private func reloadSettings() {
+        let keys = loadAutocompleteSettings()
+        let logs = loadLogSettings()
+        tabAction = keys.tabAction
+        enterAction = keys.enterAction
+        exactMatch = keys.exactMatchExecute
+        logEnabled = logs.enabled
+        logDirectory = logs.directory.path
+        retention = logs.retentionDays
+        menuBar = loadMenuBarSetting()
+    }
+}
+
+struct OverviewView: View {
+    @State private var accessibility: Bool?
+    @State private var running = false
+    @State private var autoStart = false
+    private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack {
+                Text("开始").font(.system(size: 24, weight: .semibold))
+                Spacer()
+                Button("刷新") { refresh() }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("系统权限")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(nsColor: KiroTheme.muted))
+                HStack(spacing: 14) {
+                    Image(systemName: "lock.shield")
+                        .foregroundColor(Color(nsColor: KiroTheme.accent))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("辅助功能").font(.system(size: 14, weight: .semibold))
+                        Text("跟随输入框").font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Text(accessibility == true ? "已授权" : "未授权")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(accessibility == true ? .green : .red)
+                    if accessibility != true {
+                        Button("打开设置") { openPrivacyPane("Privacy_Accessibility") }
+                        Button("请求") {
+                            requestWindowAccessibility()
+                            openPrivacyPane("Privacy_Accessibility")
+                        }
+                    }
+                }
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(nsColor: KiroTheme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color(nsColor: KiroTheme.border), lineWidth: 1))
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("补全")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(Color(nsColor: KiroTheme.muted))
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("自动补全").font(.system(size: 14, weight: .semibold))
+                        Text(autoStart ? "后台运行" : "未启用").font(.system(size: 12)).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Text(running ? "运行中" : (autoStart ? "等待应用" : "未启用"))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(running ? .green : Color(nsColor: KiroTheme.muted))
+                }
+                .padding(16)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(nsColor: KiroTheme.surface))
+                )
+            }
+        }
+        .padding(.horizontal, 40)
+        .padding(.vertical, 34)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear(perform: refresh)
+        .onReceive(timer) { _ in refresh() }
+    }
+
+    private func refresh() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let permission = WindowPermissionStatus.load().accessibility
+            let zshrc = AppPaths.home.appendingPathComponent(".zshrc")
+            let auto = (try? String(contentsOf: zshrc, encoding: .utf8))?
+                .contains("# offline-complete integration v2") ?? false
+            let marker = AppPaths.dataDir.appendingPathComponent("app.pid")
+            var isRunning = false
+            if let value = try? String(contentsOf: marker, encoding: .utf8),
+               let pid = Int32(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                isRunning = kill(pid, 0) == 0
+            }
+            DispatchQueue.main.async {
+                accessibility = permission
+                autoStart = auto
+                running = isRunning
+            }
+        }
+    }
+}
+
+struct AISettingsView: View {
+    @State private var enabled: Bool
+    @State private var protocolName: String
+    @State private var url: String
+    @State private var key: String
+    @State private var model: String
+    @State private var maxTokens: String
+    @State private var models: [String] = []
+    @State private var fetchingModels = false
+    @State private var modelStatus: String?
+    @State private var message: String?
+    @State private var isError = false
+
+    init() {
+        let settings = loadAISettings()
+        _enabled = State(initialValue: settings.enabled)
+        _protocolName = State(initialValue: settings.protocolName)
+        _url = State(initialValue: settings.url)
+        _key = State(initialValue: settings.key)
+        _model = State(initialValue: settings.model)
+        _maxTokens = State(initialValue: String(settings.maxTokens))
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("AI 补全").font(.system(size: 24, weight: .semibold))
+
+                VStack(alignment: .leading, spacing: 16) {
+                    Toggle("启用 AI 补全", isOn: $enabled)
+                    HStack(spacing: 12) {
+                        Text("协议").frame(width: 64, alignment: .leading)
+                        Picker("", selection: $protocolName) {
+                            Text("OpenAI").tag("openai")
+                            Text("Anthropic").tag("anthropic")
+                        }
+                        .labelsHidden()
+                        .frame(width: 180)
+                    }
+                    field("API 地址", text: $url, prompt: "https://api.openai.com/v1/chat/completions")
+                    HStack(spacing: 12) {
+                        Text("API Key").frame(width: 64, alignment: .leading)
+                        SecureField("API Key", text: $key)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    HStack(spacing: 12) {
+                        Text("模型").frame(width: 64, alignment: .leading)
+                        TextField("gpt-4o-mini", text: $model)
+                            .textFieldStyle(.roundedBorder)
+                        Menu("选择") {
+                            ForEach(models, id: \.self) { item in
+                                Button(item) { model = item }
+                            }
+                        }
+                        .disabled(models.isEmpty)
+                        Button(fetchingModels ? "获取中…" : "获取模型") { fetchModels() }
+                            .disabled(fetchingModels || url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if let modelStatus {
+                        Text(modelStatus)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    HStack(spacing: 12) {
+                        Text("最大 Tokens").frame(width: 80, alignment: .leading)
+                        TextField("1024", text: $maxTokens)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: 640, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(nsColor: KiroTheme.surface))
+                )
+
+                HStack(spacing: 12) {
+                    Button("保存") { save() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color(nsColor: KiroTheme.accent))
+                    Button("清除 API Key") {
+                        key = ""
+                        save()
+                    }
+                    if let message {
+                        Text(message)
+                            .font(.system(size: 12))
+                            .foregroundColor(isError ? .red : .secondary)
+                    }
+                }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 34)
+            .frame(maxWidth: 720, alignment: .leading)
+        }
+        .onChange(of: protocolName) { _ in
+            models = []
+            modelStatus = nil
+        }
+    }
+
+    private func field(_ title: String, text: Binding<String>, prompt: String) -> some View {
+        HStack(spacing: 12) {
+            Text(title).frame(width: 64, alignment: .leading)
+            TextField(prompt, text: text)
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private func save() {
+        let endpoint = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if enabled && endpoint.isEmpty {
+            message = "启用 AI 补全需要 API 地址"
+            isError = true
+            return
+        }
+        var args = [
+            "ai", "set",
+            "--enabled", enabled ? "on" : "off",
+            "--protocol", protocolName,
+            "--url", endpoint,
+            "--model", model.trimmingCharacters(in: .whitespacesAndNewlines),
+            "--max-tokens", String(max(1, min(32768, Int(maxTokens) ?? 1024))),
+        ]
+        if key.isEmpty {
+            args.append("--clear-key")
+        } else {
+            args += ["--key", key]
+        }
+        let (code, output) = runTool("oc-manage", args)
+        if code != 0 {
+            message = output.isEmpty ? "保存 AI 设置失败" : output
+            isError = true
+            return
+        }
+        message = "已保存"
+        isError = false
+    }
+
+    private func fetchModels() {
+        guard let endpoint = modelListURL() else {
+            modelStatus = "API 地址无效"
+            return
+        }
+        guard !key.isEmpty else {
+            modelStatus = "需要 API Key"
+            return
+        }
+        fetchingModels = true
+        modelStatus = nil
+        var request = URLRequest(url: endpoint)
+        request.timeoutInterval = 12
+        if protocolName == "anthropic" {
+            request.setValue(key, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                fetchingModels = false
+                if let error {
+                    modelStatus = "获取失败：\(error.localizedDescription)"
+                    return
+                }
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                    modelStatus = "获取失败：HTTP \(code)"
+                    return
+                }
+                guard let data,
+                      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let entries = root["data"] as? [[String: Any]] else {
+                    modelStatus = "响应中没有模型列表"
+                    return
+                }
+                let ids = entries.compactMap { $0["id"] as? String }.sorted()
+                guard !ids.isEmpty else {
+                    modelStatus = "模型列表为空"
+                    return
+                }
+                models = ids
+                if model.isEmpty { model = ids[0] }
+                modelStatus = "已获取 \(ids.count) 个模型"
+            }
+        }.resume()
+    }
+
+    private func modelListURL() -> URL? {
+        let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: value) else { return nil }
+        var path = components.path
+        for suffix in ["/chat/completions", "/messages"] where path.hasSuffix(suffix) {
+            path = String(path.dropLast(suffix.count))
+            break
+        }
+        if !path.hasSuffix("/models") {
+            path = path.hasSuffix("/") ? path + "models" : path + "/models"
+        }
+        components.path = path
+        return components.url
+    }
+}
+
+struct RulesView: View {
+    @State private var snapshot: RulesSnapshot?
+    @State private var query = ""
+    @State private var loading = false
+
+    private var commands: [RuleNode] {
+        guard let snapshot else { return [] }
+        return filtered(snapshot.commands, query: query)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("CLI 补全").font(.system(size: 24, weight: .semibold))
+                    if let snapshot, let error = snapshot.error {
+                        Text(error).font(.system(size: 12)).foregroundColor(.red)
+                    } else if let snapshot {
+                        Text("\(snapshot.topCount) 个命令 · \(snapshot.total) 条规则")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color(nsColor: KiroTheme.muted))
+                            .help("sha256 \(snapshot.sha)\n\(snapshot.path)")
+                    }
+                }
+                Spacer()
+                Button("刷新") { load() }
+            }
+
+            TextField("筛选命令", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 280)
+
+            if loading && snapshot == nil {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(commands.indices, id: \.self) { index in
+                            RuleNodeRow(node: commands[index])
+                        }
+                    }
+                    .padding(.trailing, 12)
+                }
+            }
+        }
+        .padding(.horizontal, 40)
+        .padding(.vertical, 34)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear { if snapshot == nil { load() } }
+    }
+
+    private func load() {
+        if loading { return }
+        loading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = loadRules()
+            DispatchQueue.main.async {
+                snapshot = result
+                loading = false
             }
         }
     }
 
-    @objc private func refreshAction() {
-        refresh()
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if let node = item as? RuleNode {
-            return node.children.count
+    private func filtered(_ nodes: [RuleNode], query: String) -> [RuleNode] {
+        guard !query.isEmpty else { return nodes }
+        return nodes.compactMap { node in
+            let children = filtered(node.children, query: query)
+            if node.name.localizedCaseInsensitiveContains(query) ||
+                node.detail.localizedCaseInsensitiveContains(query) ||
+                !children.isEmpty {
+                return RuleNode(name: node.name, detail: node.detail, children: children)
+            }
+            return nil
         }
-        return commands.count
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if let node = item as? RuleNode {
-            return node.children[index]
-        }
-        return commands[index]
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        (item as? RuleNode)?.children.isEmpty == false
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        guard let node = item as? RuleNode, let column = tableColumn else { return nil }
-        let value = column.identifier.rawValue == "name" ? node.name : node.detail
-        let cell = NSTableCellView()
-        cell.identifier = column.identifier
-        let field = NSTextField(labelWithString: value)
-        field.font = column.identifier.rawValue == "name"
-            ? .systemFont(ofSize: 13, weight: .medium)
-            : .systemFont(ofSize: 12)
-        field.textColor = column.identifier.rawValue == "name" ? KiroTheme.title : KiroTheme.muted
-        field.lineBreakMode = .byTruncatingTail
-        field.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(field)
-        cell.textField = field
-        NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
     }
 }
 
-// MARK: - Learning panel
+struct RuleNodeRow: View {
+    let node: RuleNode
+    @State private var expanded = false
 
-final class LearningPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    let view = NSView()
-    private let summary = makeLabel("", size: 12.5)
-    private let table = NSTableView()
-    private let toggle = KiroSwitch(target: nil, action: nil)
-    private var entries: [LearningEntry] = []
-    private let dateFormatter: DateFormatter = {
+    var body: some View {
+        if node.children.isEmpty {
+            row
+        } else {
+            DisclosureGroup(isExpanded: $expanded) {
+                ForEach(node.children.indices, id: \.self) { index in
+                    RuleNodeRow(node: node.children[index])
+                }
+            } label: {
+                row
+            }
+        }
+    }
+
+    private var row: some View {
+        HStack(spacing: 16) {
+            Text(node.name)
+                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                .frame(width: 240, alignment: .leading)
+            Text(node.detail)
+                .font(.system(size: 12))
+                .foregroundColor(Color(nsColor: KiroTheme.muted))
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct LearningView: View {
+    @State private var snapshot = loadLearning()
+    @State private var learning = true
+    @State private var query = ""
+    @State private var section = 0
+
+    private var entries: [LearningEntry] {
+        query.isEmpty ? snapshot.entries : snapshot.entries.filter {
+            $0.candidate.localizedCaseInsensitiveContains(query) ||
+                $0.context.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var personal: [PersonalRule] {
+        query.isEmpty ? snapshot.personal : snapshot.personal.filter {
+            $0.candidate.localizedCaseInsensitiveContains(query) ||
+                $0.context.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("本地学习").font(.system(size: 24, weight: .semibold))
+                    Text("\(learning ? "已启用" : "已关闭") · \(snapshot.entries.count) 条选择 · \(snapshot.personal.count) 条个人纠正")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: KiroTheme.muted))
+                        .help(snapshot.path)
+                }
+                Spacer()
+                Toggle("启用学习", isOn: $learning)
+                    .toggleStyle(.switch)
+                    .onChange(of: learning) { value in setLearning(value) }
+            }
+
+            HStack(spacing: 12) {
+                TextField("筛选候选", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 280)
+                Picker("", selection: $section) {
+                    Text("选择记录").tag(0)
+                    Text("个人规则").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 180)
+                Spacer()
+            }
+
+            if section == 0 {
+                selectionTable
+            } else {
+                personalTable
+            }
+
+            HStack(spacing: 10) {
+                Button("刷新") { reload() }
+                Button("清除全部…") { clear() }
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 40)
+        .padding(.vertical, 34)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear(perform: reload)
+    }
+
+    private var selectionTable: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 16) {
+                Text("上下文").frame(width: 250, alignment: .leading)
+                Text("候选").frame(width: 190, alignment: .leading)
+                Text("次数").frame(width: 50, alignment: .trailing)
+                Text("最近")
+                Spacer()
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(Color(nsColor: KiroTheme.muted))
+            .padding(.bottom, 8)
+
+            List {
+                ForEach(entries.indices, id: \.self) { index in
+                    let entry = entries[index]
+                    HStack(spacing: 16) {
+                        Text(entry.context)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(width: 250, alignment: .leading)
+                        Text(entry.candidate)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(width: 190, alignment: .leading)
+                        Text("\(entry.count)")
+                            .frame(width: 50, alignment: .trailing)
+                        Text(entry.last.map(Self.dateFormatter.string) ?? "—")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color(nsColor: KiroTheme.muted))
+                        Spacer()
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    private var personalTable: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 16) {
+                Text("上下文").frame(width: 230, alignment: .leading)
+                Text("候选").frame(width: 170, alignment: .leading)
+                Text("胜/负").frame(width: 70, alignment: .trailing)
+                Text("置信度").frame(width: 60, alignment: .trailing)
+                Text("状态").frame(width: 62, alignment: .leading)
+                Text("最近")
+                Spacer()
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(Color(nsColor: KiroTheme.muted))
+            .padding(.bottom, 8)
+
+            if personal.isEmpty {
+                Text("还没有个人纠正。多次手动修改同一上下文后，这里会出现个人规则。")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(nsColor: KiroTheme.muted))
+                    .padding(.top, 8)
+            } else {
+                List {
+                    ForEach(personal.indices, id: \.self) { index in
+                        let rule = personal[index]
+                        HStack(spacing: 16) {
+                            Text(rule.context)
+                                .font(.system(size: 12, design: .monospaced))
+                                .frame(width: 230, alignment: .leading)
+                            Text(rule.candidate)
+                                .font(.system(size: 12, design: .monospaced))
+                                .frame(width: 170, alignment: .leading)
+                            Text("\(rule.wins)/\(rule.losses)")
+                                .frame(width: 70, alignment: .trailing)
+                            Text(String(format: "%.0f%%", rule.confidence * 100))
+                                .frame(width: 60, alignment: .trailing)
+                            Text(rule.eligible ? "已生效" : "观察中")
+                                .frame(width: 62, alignment: .leading)
+                                .foregroundColor(rule.eligible ? Color(nsColor: KiroTheme.accent) : Color(nsColor: KiroTheme.muted))
+                            Text(rule.last.map(Self.dateFormatter.string) ?? "—")
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(nsColor: KiroTheme.muted))
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+    }
+
+    private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MM-dd HH:mm"
         return formatter
     }()
 
-    override init() {
-        view.frame = NSRect(x: 0, y: 0, width: 840, height: 732)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = KiroTheme.background.cgColor
-        super.init()
-        let title = kiroSectionTitle("学习")
-        title.frame = NSRect(x: KiroTheme.contentInset, y: 664, width: 400, height: 24)
-        title.autoresizingMask = [.minYMargin]
-        view.addSubview(title)
-        summary.frame = NSRect(x: KiroTheme.contentInset, y: 638, width: 740, height: 18)
-        summary.autoresizingMask = [.width, .minYMargin]
-        summary.textColor = KiroTheme.muted
-        summary.lineBreakMode = .byTruncatingTail
-        view.addSubview(summary)
-
-        let columns: [(String, String, CGFloat)] = [
-            ("context", "上下文", 280),
-            ("candidate", "候选", 190),
-            ("count", "次数", 60),
-            ("last", "最近", 150),
-        ]
-        for (identifier, title, width) in columns {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
-            column.title = title
-            column.width = width
-            table.addTableColumn(column)
-        }
-        table.headerView = nil
-        table.rowHeight = 30
-        table.usesAlternatingRowBackgroundColors = false
-        table.backgroundColor = .clear
-        table.gridStyleMask = []
-        table.columnAutoresizingStyle = .noColumnAutoresizing
-        table.focusRingType = .none
-        table.frame = NSRect(x: 0, y: 0, width: 680, height: 0)
-        table.dataSource = self
-        table.delegate = self
-
-        let headers: [(String, CGFloat, CGFloat)] = [
-            ("上下文", 48, 270),
-            ("候选", 328, 180),
-            ("次数", 518, 50),
-            ("最近", 578, 150),
-        ]
-        for (text, x, width) in headers {
-            let header = makeLabel(text, size: 11.5, weight: .semibold)
-            header.textColor = KiroTheme.muted
-            header.frame = NSRect(x: x, y: 596, width: width, height: 18)
-            header.autoresizingMask = [.maxXMargin, .minYMargin]
-            view.addSubview(header)
-        }
-
-        let scroll = NSScrollView()
-        scroll.frame = NSRect(x: KiroTheme.contentInset, y: 70, width: 760, height: 514)
-        scroll.autoresizingMask = [.width, .height]
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 8
-        scroll.layer?.borderWidth = 1
-        scroll.layer?.borderColor = KiroTheme.border.cgColor
-        table.autoresizingMask = [.width]
-        scroll.documentView = table
-        view.addSubview(scroll)
-
-        toggle.target = self
-        toggle.action = #selector(toggleLearning(_:))
-        toggle.frame = NSRect(x: KiroTheme.contentInset, y: 29, width: 44, height: 26)
-        toggle.autoresizingMask = [.maxYMargin]
-        view.addSubview(toggle)
-        let toggleLabel = makeLabel("启用学习", size: 13)
-        toggleLabel.textColor = KiroTheme.title
-        toggleLabel.frame = NSRect(x: KiroTheme.contentInset + 54, y: 32, width: 90, height: 20)
-        toggleLabel.autoresizingMask = [.maxYMargin]
-        view.addSubview(toggleLabel)
-
-        let refresh = makeButton("刷新", target: self, action: #selector(refreshAction))
-        refresh.frame = NSRect(x: KiroTheme.contentInset + 156, y: 24, width: 86, height: 32)
-        refresh.autoresizingMask = [.maxYMargin]
-        view.addSubview(refresh)
-
-        let clear = makeButton("清除选择…", target: self, action: #selector(clearAction))
-        clear.frame = NSRect(x: KiroTheme.contentInset + 252, y: 24, width: 126, height: 32)
-        clear.autoresizingMask = [.maxYMargin]
-        view.addSubview(clear)
+    private func reload() {
+        snapshot = loadLearning()
+        learning = snapshot.learning
     }
 
-    func refresh() {
-        let snapshot = loadLearning()
-        entries = snapshot.entries
-        toggle.state = snapshot.learning ? .on : .off
-        if let error = snapshot.error {
-            summary.stringValue = "学习数据加载失败：\(error)  \(snapshot.path)"
-            summary.textColor = .systemRed
-        } else {
-            let state = snapshot.learning ? "已启用" : "已关闭（已记录的选择仍保留）"
-            summary.stringValue = "\(state) · \(entries.count) 条选择 · \(formatBytes(snapshot.bytes)) · \(snapshot.path)"
-            summary.textColor = KiroTheme.muted
-        }
-        table.reloadData()
-    }
-
-    @objc private func refreshAction() {
-        refresh()
-    }
-
-    @objc private func toggleLearning(_ sender: KiroSwitch) {
-        let enabled = sender.state == .on
-        let (code, output) = runTool("oc-manage", ["learning", enabled ? "on" : "off"])
+    private func setLearning(_ value: Bool) {
+        let (code, output) = runTool("oc-manage", ["learning", value ? "on" : "off"])
         if code != 0 {
             showAlert("修改学习设置失败", output.isEmpty ? "oc-manage 返回 \(code)" : output)
-            sender.state = enabled ? .off : .on
-            return
+            learning = !value
         }
-        refresh()
     }
 
-    @objc private func clearAction() {
+    private func clear() {
         let alert = NSAlert()
-        alert.messageText = "清除全部学习选择？"
-        alert.informativeText = "只删除本机的选择计数和最近使用时间，不会删除规则或日志。"
+        alert.messageText = "清除全部本地学习数据？"
+        alert.informativeText = "选择记录和个人纠正都会删除。"
         alert.addButton(withTitle: "清除")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -1406,223 +1954,137 @@ final class LearningPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate 
             showAlert("清除失败", output.isEmpty ? "oc-manage 返回 \(code)" : output)
             return
         }
-        refresh()
+        reload()
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        entries.count
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let column = tableColumn, row >= 0, row < entries.count else { return nil }
-        let entry = entries[row]
-        let value: String
-        switch column.identifier.rawValue {
-        case "context": value = entry.context
-        case "candidate": value = entry.candidate
-        case "count": value = String(entry.count)
-        case "last": value = entry.last.map { dateFormatter.string(from: $0) } ?? "-"
-        default: value = ""
-        }
-        let cell = NSTableCellView()
-        cell.identifier = column.identifier
-        let field = NSTextField(labelWithString: value)
-        field.font = .systemFont(ofSize: 12.5)
-        field.textColor = KiroTheme.title
-        field.lineBreakMode = .byTruncatingTail
-        if column.identifier.rawValue == "count" {
-            field.alignment = .right
-        }
-        field.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(field)
-        cell.textField = field
-        NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        return cell
-    }
 }
 
-// MARK: - Logs panel
+struct LogsView: View {
+    let active: Bool
 
-final class LogPanel: NSObject {
-    let view = NSView()
-    private let summary = makeLabel("", size: 12.5)
-    private let filePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let scroll: NSScrollView
-    private let text: NSTextView
-    private let autoRefresh = KiroSwitch(target: nil, action: nil)
-    private let autoScroll = KiroSwitch(target: nil, action: nil)
-    private var settings = loadLogSettings()
-    private var files: [URL] = []
-    private var selectedURL: URL?
-    private var lastSize = -1
-    private var lastModified: Date?
+    @State private var settings = loadLogSettings()
+    @State private var files: [URL] = []
+    @State private var selectedPath = ""
+    @State private var content = ""
+    @State private var autoRefresh = true
+    @State private var autoScroll = true
+    @State private var lastSize = -1
 
-    override init() {
-        view.frame = NSRect(x: 0, y: 0, width: 840, height: 732)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = KiroTheme.background.cgColor
-        (scroll, text) = makeTextScroll()
-        super.init()
-        let title = kiroSectionTitle("日志")
-        title.frame = NSRect(x: KiroTheme.contentInset, y: 664, width: 400, height: 24)
-        title.autoresizingMask = [.minYMargin]
-        view.addSubview(title)
-        summary.frame = NSRect(x: KiroTheme.contentInset, y: 638, width: 560, height: 18)
-        summary.autoresizingMask = [.maxXMargin, .minYMargin]
-        summary.textColor = KiroTheme.muted
-        summary.lineBreakMode = .byTruncatingMiddle
-        view.addSubview(summary)
+    private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-        filePopup.frame = NSRect(x: 620, y: 631, width: 180, height: 26)
-        filePopup.autoresizingMask = [.minXMargin, .minYMargin]
-        filePopup.target = self
-        filePopup.action = #selector(fileChanged(_:))
-        view.addSubview(filePopup)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("日志").font(.system(size: 24, weight: .semibold))
+                Text(summary)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(nsColor: KiroTheme.muted))
+                    .lineLimit(1)
+                Spacer()
+                if files.count > 1 {
+                    Picker("", selection: $selectedPath) {
+                        ForEach(files, id: \.path) { url in
+                            Text(url.lastPathComponent).tag(url.path)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 220)
+                    .onChange(of: selectedPath) { _ in
+                        lastSize = -1
+                        refresh(force: true)
+                    }
+                }
+            }
 
-        scroll.frame = NSRect(x: KiroTheme.contentInset, y: 70, width: 760, height: 550)
-        scroll.autoresizingMask = [.width, .height]
-        view.addSubview(scroll)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(content.isEmpty ? "暂无日志" : content)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .id("log-end")
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: KiroTheme.surface))
+                        .overlay(RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(nsColor: KiroTheme.border), lineWidth: 1))
+                )
+                .onChange(of: content) { _ in
+                    if autoScroll { proxy.scrollTo("log-end", anchor: .bottom) }
+                }
+            }
 
-        autoRefresh.state = .on
-        autoRefresh.frame = NSRect(x: KiroTheme.contentInset, y: 29, width: 44, height: 26)
-        autoRefresh.autoresizingMask = [.maxYMargin]
-        view.addSubview(autoRefresh)
-        let refreshLabel = makeLabel("自动刷新", size: 13)
-        refreshLabel.textColor = KiroTheme.title
-        refreshLabel.frame = NSRect(x: KiroTheme.contentInset + 52, y: 32, width: 74, height: 20)
-        refreshLabel.autoresizingMask = [.maxYMargin]
-        view.addSubview(refreshLabel)
-
-        autoScroll.state = .on
-        autoScroll.frame = NSRect(x: KiroTheme.contentInset + 136, y: 29, width: 44, height: 26)
-        autoScroll.autoresizingMask = [.maxYMargin]
-        view.addSubview(autoScroll)
-        let scrollLabel = makeLabel("自动滚动", size: 13)
-        scrollLabel.textColor = KiroTheme.title
-        scrollLabel.frame = NSRect(x: KiroTheme.contentInset + 188, y: 32, width: 74, height: 20)
-        scrollLabel.autoresizingMask = [.maxYMargin]
-        view.addSubview(scrollLabel)
-
-        let refresh = makeButton("刷新", target: self, action: #selector(refreshAction))
-        refresh.frame = NSRect(x: KiroTheme.contentInset + 272, y: 24, width: 86, height: 32)
-        refresh.autoresizingMask = [.maxYMargin]
-        view.addSubview(refresh)
-        let revealButton = makeButton("在 Finder 中显示", target: self, action: #selector(revealAction))
-        revealButton.frame = NSRect(x: KiroTheme.contentInset + 368, y: 24, width: 148, height: 32)
-        revealButton.autoresizingMask = [.maxYMargin]
-        view.addSubview(revealButton)
-        let clear = makeButton("清空日志", target: self, action: #selector(clearAction))
-        clear.frame = NSRect(x: KiroTheme.contentInset + 526, y: 24, width: 106, height: 32)
-        clear.autoresizingMask = [.maxYMargin]
-        view.addSubview(clear)
-
-        reloadSettings()
+            HStack(spacing: 14) {
+                Toggle("自动刷新", isOn: $autoRefresh)
+                Toggle("自动滚动", isOn: $autoScroll)
+                Spacer()
+                Button("刷新") { reload() }
+                Button("在 Finder 中显示") { revealLog() }
+                Button("清空日志") { clear() }
+            }
+        }
+        .padding(.horizontal, 40)
+        .padding(.vertical, 34)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear(perform: reload)
+        .onChange(of: active) { value in if value { reload() } }
+        .onReceive(timer) { _ in
+            if active && autoRefresh { tick() }
+        }
     }
 
-    func reloadSettings() {
-        let previousCurrent = settings.currentURL.path
+    private var selectedURL: URL {
+        if let url = files.first(where: { $0.path == selectedPath }) { return url }
+        return settings.currentURL
+    }
+
+    private var summary: String {
+        let url = selectedURL
+        if !settings.enabled { return "已关闭" }
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
+        return "\(formatBytes(size)) · \(url.lastPathComponent)"
+    }
+
+    private func reload() {
         settings = loadLogSettings()
         files = listLogFiles(settings)
-        let previous = selectedURL?.path
-        filePopup.removeAllItems()
-        for url in files {
-            filePopup.addItem(withTitle: url.lastPathComponent)
-        }
-        var index = 0
-        if let previous, previous != previousCurrent, let found = files.firstIndex(where: { $0.path == previous }) {
-            index = found
-        } else if let found = files.firstIndex(where: { $0.path == settings.currentURL.path }) {
-            index = found
-        }
-        if !files.isEmpty {
-            filePopup.selectItem(at: index)
-            selectedURL = files[index]
-            filePopup.isEnabled = true
-        } else {
-            selectedURL = settings.currentURL
-            filePopup.isEnabled = false
+        if !files.contains(where: { $0.path == selectedPath }) {
+            selectedPath = files.first?.path ?? settings.currentURL.path
         }
         lastSize = -1
-        lastModified = nil
         refresh(force: true)
     }
 
-    func tick() {
-        guard autoRefresh.state == .on else { return }
+    private func tick() {
         let latest = loadLogSettings()
         if latest.currentURL.path != settings.currentURL.path ||
             latest.enabled != settings.enabled ||
-            latest.retentionDays != settings.retentionDays ||
-            latest.error != settings.error {
-            reloadSettings()
-            return
+            latest.retentionDays != settings.retentionDays {
+            reload()
+        } else {
+            refresh(force: false)
         }
-        refresh(force: false)
     }
 
-    func refresh(force: Bool) {
-        let url = selectedURL ?? settings.currentURL
+    private func refresh(force: Bool) {
+        let url = selectedURL
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
-        let modified = attributes?[.modificationDate] as? Date
-        if !force && size == lastSize && modified == lastModified {
-            return
-        }
+        if !force && size == lastSize { return }
         lastSize = size
-        lastModified = modified
-
-        if !settings.enabled {
-            summary.stringValue = "日志已关闭 · \(settings.directory.path)"
-            summary.textColor = KiroTheme.muted
-        } else if let error = settings.error {
-            summary.stringValue = "日志设置无效：\(error)"
-            summary.textColor = .systemRed
-        } else if FileManager.default.fileExists(atPath: url.path) {
-            summary.stringValue = "日志 · \(formatBytes(size)) · \(url.path)"
-            summary.textColor = KiroTheme.muted
-        } else {
-            summary.stringValue = "日志尚未生成 · \(url.path)"
-            summary.textColor = KiroTheme.muted
-        }
-
         guard let data = try? Data(contentsOf: url) else {
-            if settings.enabled {
-                text.string = "日志尚未生成。运行 oc 后，agent 会把启动、补全、选择和错误事件写入这里。\n\n\(url.path)"
-            } else {
-                text.string = "日志已关闭。可在“设置”页启用后重新启动 oc。\n\n\(settings.currentURL.path)"
-            }
+            content = settings.enabled ? "暂无日志" : "日志已关闭"
             return
         }
-        let tail = data.count > 256 * 1024 ? data.suffix(256 * 1024) : data
-        var content = String(decoding: tail, as: UTF8.self)
-        if content.isEmpty {
-            content = "日志为空。"
-        }
-        text.string = content
-        if autoScroll.state == .on {
-            text.scrollToEndOfDocument(nil)
-        }
+        let tail = data.count > 64 * 1024 ? data.suffix(64 * 1024) : data
+        content = String(decoding: tail, as: UTF8.self)
     }
 
-    @objc private func fileChanged(_ sender: NSPopUpButton) {
-        let index = sender.indexOfSelectedItem
-        guard index >= 0, index < files.count else { return }
-        selectedURL = files[index]
-        lastSize = -1
-        lastModified = nil
-        refresh(force: true)
-    }
-
-    @objc private func refreshAction() {
-        reloadSettings()
-    }
-
-    @objc private func revealAction() {
-        let url = selectedURL ?? settings.currentURL
+    private func revealLog() {
+        let url = selectedURL
         if FileManager.default.fileExists(atPath: url.path) {
             reveal(url)
         } else {
@@ -1635,20 +2097,14 @@ final class LogPanel: NSObject {
         }
     }
 
-    @objc private func clearAction() {
-        let url = selectedURL ?? settings.currentURL
+    private func clear() {
+        let url = selectedURL
         let alert = NSAlert()
         alert.messageText = "清空当前日志？"
-        alert.informativeText = "\(url.lastPathComponent) 会立即被截断，正在运行的 oc 会继续写入新日志。"
         alert.addButton(withTitle: "清空")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            try FileManager.default.createDirectory(
-                at: settings.directory,
-                withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700]
-            )
             try Data().write(to: url)
             refresh(force: true)
         } catch {
@@ -1657,475 +2113,13 @@ final class LogPanel: NSObject {
     }
 }
 
-// MARK: - AI settings panel
-
-final class AIPanel: NSObject {
-    let view = NSView()
-    private let enabled = KiroSwitch(target: nil, action: nil)
-    private let protocolButton = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let url = NSTextField()
-    private let key = NSSecureTextField()
-    private let model = NSTextField()
-    private let maxTokens = NSTextField()
-    private let status = makeLabel("", size: 12)
-    private let note = makeLabel("", size: 12)
-
-    override init() {
-        super.init()
-        view.frame = NSRect(x: 0, y: 0, width: 840, height: 732)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = KiroTheme.background.cgColor
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: KiroTheme.contentInset),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -KiroTheme.contentInset),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 34),
-        ])
-
-        let intro = kiroBody("可选 AI 补全只支持 OpenAI Chat Completions 和 Anthropic Messages。关闭时不会发起任何 AI 请求。")
-        intro.preferredMaxLayoutWidth = 680
-        stack.addArrangedSubview(kiroSectionTitle("AI 补全"))
-        stack.addArrangedSubview(intro)
-
-        let enableRow = NSView()
-        enableRow.translatesAutoresizingMaskIntoConstraints = false
-        enabled.target = self
-        enabled.action = #selector(changed)
-        enabled.translatesAutoresizingMaskIntoConstraints = false
-        let enableTitle = kiroTitle("启用 AI 补全")
-        let enableDetail = kiroBody("使用下方 endpoint；API key 保存在 ~/.oc/config.json（0600）。")
-        enableDetail.maximumNumberOfLines = 1
-        let enableText = NSStackView(views: [enableTitle, enableDetail])
-        enableText.orientation = .vertical
-        enableText.alignment = .leading
-        enableText.spacing = 3
-        enableText.translatesAutoresizingMaskIntoConstraints = false
-        enableRow.addSubview(enabled)
-        enableRow.addSubview(enableText)
-        NSLayoutConstraint.activate([
-            enabled.leadingAnchor.constraint(equalTo: enableRow.leadingAnchor),
-            enabled.widthAnchor.constraint(equalToConstant: 44),
-            enabled.heightAnchor.constraint(equalToConstant: 26),
-            enabled.centerYAnchor.constraint(equalTo: enableTitle.centerYAnchor),
-            enableText.leadingAnchor.constraint(equalTo: enabled.trailingAnchor, constant: 16),
-            enableText.trailingAnchor.constraint(equalTo: enableRow.trailingAnchor),
-            enableText.topAnchor.constraint(equalTo: enableRow.topAnchor),
-            enableText.bottomAnchor.constraint(equalTo: enableRow.bottomAnchor),
-        ])
-        stack.addArrangedSubview(enableRow)
-        enableRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        protocolButton.addItems(withTitles: ["OpenAI Chat Completions", "Anthropic Messages"])
-        protocolButton.controlSize = .regular
-        protocolButton.font = .systemFont(ofSize: 13)
-        protocolButton.widthAnchor.constraint(equalToConstant: 240).isActive = true
-        stack.setCustomSpacing(22, after: enableRow)
-        stack.addArrangedSubview(fieldLabel("协议"))
-        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(protocolButton)
-
-        configureField(url, placeholder: "https://api.openai.com/v1/chat/completions")
-        configureField(key, placeholder: "API key")
-        configureField(model, placeholder: "gpt-4o-mini 或 claude-3-5-sonnet-latest")
-        configureField(maxTokens, placeholder: "1024")
-
-        for (title, field) in [
-            ("Endpoint URL", url),
-            ("API Key", key),
-            ("模型", model),
-            ("Max Tokens（Anthropic）", maxTokens),
-        ] {
-            stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
-            stack.addArrangedSubview(fieldLabel(title))
-            stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
-            stack.addArrangedSubview(field)
-            field.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            field.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        }
-
-        let actions = NSStackView()
-        actions.orientation = .horizontal
-        actions.spacing = 10
-        actions.alignment = .centerY
-        let save = KiroButton(title: "保存 AI 设置", style: .primary, target: self, action: #selector(saveSettings))
-        let clear = makeButton("清除 API Key", target: self, action: #selector(clearKey))
-        for button in [save, clear] {
-            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            button.widthAnchor.constraint(equalToConstant: 136).isActive = true
-            actions.addArrangedSubview(button)
-        }
-        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(actions)
-
-        status.translatesAutoresizingMaskIntoConstraints = false
-        note.translatesAutoresizingMaskIntoConstraints = false
-        note.maximumNumberOfLines = 2
-        note.lineBreakMode = .byWordWrapping
-        stack.setCustomSpacing(14, after: actions)
-        stack.addArrangedSubview(status)
-        stack.addArrangedSubview(note)
-        status.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        note.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        let foot = kiroBody("AI 请求只在触发 AI generator 时发生；静态和其他 generator 不受影响。")
-        foot.textColor = KiroTheme.muted
-        stack.setCustomSpacing(18, after: note)
-        stack.addArrangedSubview(foot)
-        refresh()
-    }
-
-    private func configureField(_ field: NSTextField, placeholder: String) {
-        field.placeholderString = placeholder
-        field.font = .systemFont(ofSize: 13)
-        field.isBezeled = true
-        field.isBordered = true
-        field.drawsBackground = true
-        field.backgroundColor = KiroTheme.surface
-        field.textColor = KiroTheme.title
-        field.focusRingType = .none
-    }
-
-    private func fieldLabel(_ text: String) -> NSTextField {
-        let label = makeLabel(text, size: 13, weight: .semibold)
-        label.textColor = KiroTheme.title
-        return label
-    }
-
-    func refresh() {
-        let settings = loadAISettings()
-        enabled.state = settings.enabled ? .on : .off
-        protocolButton.selectItem(at: settings.protocolName == "anthropic" ? 1 : 0)
-        url.stringValue = settings.url
-        key.stringValue = settings.key
-        model.stringValue = settings.model
-        maxTokens.stringValue = String(settings.maxTokens)
-        if let error = settings.error {
-            status.stringValue = "设置文件无效：\(error)"
-            status.textColor = .systemRed
-        } else {
-            status.stringValue = settings.enabled ? "AI 补全已启用" : "AI 补全已关闭"
-            status.textColor = settings.enabled ? .systemGreen : KiroTheme.muted
-        }
-        note.stringValue = settings.enabled ? "" : "关闭时不会发起 AI 请求。"
-        note.textColor = .systemOrange
-    }
-
-    @objc private func changed() {
-        note.stringValue = enabled.state == .on ? "" : "关闭时不会发起 AI 请求。"
-        note.textColor = .systemOrange
-    }
-
-    @objc private func saveSettings() {
-        let on = enabled.state == .on
-        let endpoint = url.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if on && endpoint.isEmpty {
-            showAlert("AI 设置不完整", "启用 AI 补全时必须填写 Endpoint URL。")
-            return
-        }
-        var args = [
-            "ai", "set",
-            "--enabled", on ? "on" : "off",
-            "--protocol", protocolButton.indexOfSelectedItem == 1 ? "anthropic" : "openai",
-            "--url", endpoint,
-            "--model", model.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            "--max-tokens", String(max(1, min(32768, Int(maxTokens.stringValue) ?? 1024))),
-        ]
-        let keyValue = key.stringValue
-        if keyValue.isEmpty {
-            args.append("--clear-key")
-        } else {
-            args += ["--key", keyValue]
-        }
-        let (code, output) = runTool("oc-manage", args)
-        if code != 0 {
-            showAlert("保存 AI 设置失败", output.isEmpty ? "oc-manage 返回 \(code)" : output)
-            return
-        }
-        refresh()
-        status.stringValue = "已保存；新开的 oc 会话使用新设置。"
-        status.textColor = .systemGreen
-    }
-
-    @objc private func clearKey() {
-        key.stringValue = ""
-        saveSettings()
-    }
-}
-
-// MARK: - Settings panel
-
-final class SettingsPanel: NSObject {
-    let view = NSView()
-    private let enabled = KiroSwitch(target: nil, action: nil)
-    private let directory = NSTextField()
-    private let retention = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let status = makeLabel("", size: 12)
-    private let note = makeLabel("", size: 12)
-    private var retentionOptions = [1, 3, 7, 14, 30]
-    var onChange: (() -> Void)?
-
-    init(onChange: (() -> Void)?) {
-        self.onChange = onChange
-        super.init()
-        view.frame = NSRect(x: 0, y: 0, width: 840, height: 732)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = KiroTheme.background.cgColor
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 16
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: KiroTheme.contentInset),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -KiroTheme.contentInset),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 34),
-        ])
-
-        let intro = kiroBody("控制 agent 是否写日志、日志存储目录和保留天数。")
-        intro.preferredMaxLayoutWidth = 680
-        stack.addArrangedSubview(kiroSectionTitle("设置"))
-        stack.addArrangedSubview(intro)
-        stack.setCustomSpacing(22, after: intro)
-
-        let logHeader = kiroSectionTitle("日志")
-        stack.addArrangedSubview(logHeader)
-        stack.setCustomSpacing(8, after: logHeader)
-
-        enabled.target = self
-        enabled.action = #selector(settingChanged)
-        enabled.translatesAutoresizingMaskIntoConstraints = false
-        let enabledRow = NSView()
-        enabledRow.translatesAutoresizingMaskIntoConstraints = false
-        let enabledTitle = kiroTitle("启用 agent 日志")
-        let enabledDetail = kiroBody("写入启动、补全、选择和错误事件；只记录元数据。")
-        enabledDetail.lineBreakMode = .byTruncatingTail
-        enabledDetail.maximumNumberOfLines = 1
-        let enabledText = NSStackView(views: [enabledTitle, enabledDetail])
-        enabledText.orientation = .vertical
-        enabledText.alignment = .leading
-        enabledText.spacing = 3
-        enabledText.translatesAutoresizingMaskIntoConstraints = false
-        enabledRow.addSubview(enabled)
-        enabledRow.addSubview(enabledText)
-        NSLayoutConstraint.activate([
-            enabled.leadingAnchor.constraint(equalTo: enabledRow.leadingAnchor),
-            enabled.widthAnchor.constraint(equalToConstant: 44),
-            enabled.heightAnchor.constraint(equalToConstant: 26),
-            enabled.centerYAnchor.constraint(equalTo: enabledTitle.centerYAnchor),
-            enabledText.leadingAnchor.constraint(equalTo: enabled.trailingAnchor, constant: 16),
-            enabledText.trailingAnchor.constraint(equalTo: enabledRow.trailingAnchor),
-            enabledText.topAnchor.constraint(equalTo: enabledRow.topAnchor),
-            enabledText.bottomAnchor.constraint(equalTo: enabledRow.bottomAnchor),
-        ])
-        stack.addArrangedSubview(enabledRow)
-        enabledRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        let directoryLabel = makeLabel("存储目录", size: 14, weight: .semibold)
-        directoryLabel.textColor = KiroTheme.title
-        stack.setCustomSpacing(26, after: enabledRow)
-        stack.addArrangedSubview(directoryLabel)
-        let directoryRow = NSStackView()
-        directoryRow.orientation = .horizontal
-        directoryRow.alignment = .centerY
-        directoryRow.spacing = 10
-
-        let directoryBox = NSView()
-        directoryBox.wantsLayer = true
-        directoryBox.layer?.cornerRadius = 7
-        directoryBox.layer?.backgroundColor = KiroTheme.surface.cgColor
-        directoryBox.layer?.borderWidth = 1
-        directoryBox.layer?.borderColor = KiroTheme.border.cgColor
-        directoryBox.translatesAutoresizingMaskIntoConstraints = false
-        directory.isBordered = false
-        directory.isBezeled = false
-        directory.drawsBackground = false
-        directory.focusRingType = .none
-        directory.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        directory.textColor = KiroTheme.title
-        directory.placeholderString = "~/.oc/logs"
-        directory.translatesAutoresizingMaskIntoConstraints = false
-        directoryBox.addSubview(directory)
-        NSLayoutConstraint.activate([
-            directory.leadingAnchor.constraint(equalTo: directoryBox.leadingAnchor, constant: 12),
-            directory.trailingAnchor.constraint(equalTo: directoryBox.trailingAnchor, constant: -12),
-            directory.centerYAnchor.constraint(equalTo: directoryBox.centerYAnchor),
-            directoryBox.heightAnchor.constraint(equalToConstant: 34),
-        ])
-        directoryRow.addArrangedSubview(directoryBox)
-        directoryBox.widthAnchor.constraint(equalTo: directoryRow.widthAnchor, constant: -222).isActive = true
-        let choose = makeButton("选择…", target: self, action: #selector(chooseDirectory))
-        let defaults = makeButton("恢复默认", target: self, action: #selector(useDefaults))
-        for button in [choose, defaults] {
-            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            button.widthAnchor.constraint(equalToConstant: 96).isActive = true
-            directoryRow.addArrangedSubview(button)
-        }
-        stack.addArrangedSubview(directoryRow)
-        directoryRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        let retentionLabel = makeLabel("保留天数", size: 14, weight: .semibold)
-        retentionLabel.textColor = KiroTheme.title
-        stack.setCustomSpacing(22, after: directoryRow)
-        stack.addArrangedSubview(retentionLabel)
-        retention.controlSize = .regular
-        retention.font = .systemFont(ofSize: 13)
-        retention.widthAnchor.constraint(equalToConstant: 140).isActive = true
-        retention.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        stack.addArrangedSubview(retention)
-
-        let actions = NSStackView()
-        actions.orientation = .horizontal
-        actions.spacing = 10
-        actions.alignment = .centerY
-        let save = KiroButton(title: "保存设置", style: .primary, target: self, action: #selector(saveSettings))
-        let open = makeButton("打开日志目录", target: self, action: #selector(openDirectory))
-        for button in [save, open] {
-            button.heightAnchor.constraint(equalToConstant: 32).isActive = true
-            button.widthAnchor.constraint(equalToConstant: 128).isActive = true
-            actions.addArrangedSubview(button)
-        }
-        stack.setCustomSpacing(28, after: retention)
-        stack.addArrangedSubview(actions)
-
-        status.translatesAutoresizingMaskIntoConstraints = false
-        status.lineBreakMode = .byTruncatingMiddle
-        note.translatesAutoresizingMaskIntoConstraints = false
-        note.lineBreakMode = .byWordWrapping
-        note.maximumNumberOfLines = 2
-        stack.setCustomSpacing(18, after: actions)
-        stack.addArrangedSubview(status)
-        stack.addArrangedSubview(note)
-        status.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        note.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        let environment = kiroBody("默认：~/.oc/logs/agent-YYYY-MM-DD.log，保留今天和前两天。运行中的 oc 在下一次日志事件时使用新设置；环境变量 OFFLINE_COMPLETE_LOG* 会覆盖设置。")
-        environment.textColor = KiroTheme.muted
-        environment.preferredMaxLayoutWidth = 700
-        stack.setCustomSpacing(20, after: note)
-        stack.addArrangedSubview(environment)
-        environment.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        refresh()
-    }
-
-    func refresh() {
-        let settings = loadLogSettings()
-        enabled.state = settings.enabled ? .on : .off
-        directory.stringValue = settings.directory.path
-        if !retentionOptions.contains(settings.retentionDays) {
-            retentionOptions.append(settings.retentionDays)
-            retentionOptions.sort()
-        }
-        retention.removeAllItems()
-        retention.addItems(withTitles: retentionOptions.map { "\($0) 天" })
-        if let index = retentionOptions.firstIndex(of: settings.retentionDays) {
-            retention.selectItem(at: index)
-        }
-        if let error = settings.error {
-            status.stringValue = "设置文件无效：\(error)"
-            status.textColor = .systemRed
-        } else {
-            status.stringValue = "当前文件：\(settings.currentURL.path)"
-            status.textColor = KiroTheme.muted
-        }
-        note.stringValue = settings.enabled ? "" : "日志已关闭；运行中的 oc 会在下一次日志事件时停止写入。"
-        note.textColor = .systemOrange
-    }
-
-    private var selectedRetentionDays: Int {
-        let index = retention.indexOfSelectedItem
-        guard index >= 0, index < retentionOptions.count else { return 3 }
-        return retentionOptions[index]
-    }
-
-    @objc private func settingChanged() {
-        note.stringValue = enabled.state == .on ? "" : "日志已关闭；运行中的 oc 会在下一次日志事件时停止写入。"
-        note.textColor = .systemOrange
-    }
-
-    @objc private func chooseDirectory() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "选择"
-        let current = expandTilde(directory.stringValue)
-        if !current.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: current)
-        }
-        if panel.runModal() == .OK, let url = panel.url {
-            directory.stringValue = url.path
-        }
-    }
-
-    @objc private func useDefaults() {
-        enabled.state = .on
-        directory.stringValue = AppPaths.defaultLogDirectory.path
-        retentionOptions = [1, 3, 7, 14, 30]
-        retention.removeAllItems()
-        retention.addItems(withTitles: retentionOptions.map { "\($0) 天" })
-        retention.selectItem(at: 1)
-        status.stringValue = "已恢复默认值；点击“保存设置”应用。"
-        status.textColor = KiroTheme.muted
-    }
-
-    @objc private func saveSettings() {
-        var path = expandTilde(directory.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
-        if path.isEmpty {
-            path = AppPaths.defaultLogDirectory.path
-        }
-        let (code, output) = runTool("oc-manage", [
-            "logging", "set",
-            "--enabled", enabled.state == .on ? "on" : "off",
-            "--directory", path,
-            "--retention-days", String(selectedRetentionDays),
-        ])
-        if code != 0 {
-            showAlert("保存日志设置失败", output.isEmpty ? "oc-manage 返回 \(code)" : output)
-            return
-        }
-        refresh()
-        status.stringValue = "已保存；运行中的 oc 会在下一次日志事件时使用新设置。"
-        status.textColor = .systemGreen
-        onChange?()
-    }
-
-    @objc private func openDirectory() {
-        let url = URL(fileURLWithPath: expandTilde(directory.stringValue))
-        try? FileManager.default.createDirectory(
-            at: url,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
-        NSWorkspace.shared.open(url)
-    }
-}
-
 // MARK: - Main window
 
-final class MainWindowController: NSObject {
+final class MainWindowController: NSObject, NSWindowDelegate {
     let window: NSWindow
-    private let container = NSView()
-    private let overview = OverviewPanel()
-    private let rules = RulesPanel()
-    private let learning = LearningPanel()
-    private let logs = LogPanel()
-    private let ai = AIPanel()
-    private lazy var settings = SettingsPanel(onChange: { [weak self] in
-        self?.logs.reloadSettings()
-        self?.overview.refresh()
-    })
-    private var panels: [(String, NSView)] = []
-    private var sidebarItems: [(String, KiroSidebarItem)] = []
-    private var timer: Timer?
+    private let model = AppShellModel()
+    private var host: NSHostingView<AppShellView>!
+    var onVisibilityChanged: ((Bool) -> Void)?
 
     override init() {
         let contentSize = NSSize(width: 1100, height: 760)
@@ -2139,101 +2133,17 @@ final class MainWindowController: NSObject {
         window.title = "Offline Complete"
         window.titlebarAppearsTransparent = true
         window.backgroundColor = KiroTheme.background
-        window.minSize = NSSize(width: 980, height: 640)
+        window.minSize = NSSize(width: 960, height: 620)
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("OfflineCompleteMainWindow")
+        window.delegate = self
 
-        let content = NSView(frame: NSRect(origin: .zero, size: contentSize))
-        content.wantsLayer = true
-        content.layer?.backgroundColor = KiroTheme.background.cgColor
-
-        let sidebar = NSView(frame: NSRect(x: 0, y: 0, width: KiroTheme.sidebarWidth, height: contentSize.height))
-        sidebar.wantsLayer = true
-        sidebar.layer?.backgroundColor = KiroTheme.background.cgColor
-        sidebar.autoresizingMask = [.height]
-        content.addSubview(sidebar)
-
-        let divider = NSView(frame: NSRect(x: KiroTheme.sidebarWidth, y: 0, width: 1, height: contentSize.height))
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = KiroTheme.border.cgColor
-        divider.autoresizingMask = [.height]
-        content.addSubview(divider)
-
-        container.frame = NSRect(
-            x: KiroTheme.sidebarWidth + 1,
-            y: 0,
-            width: contentSize.width - KiroTheme.sidebarWidth - 1,
-            height: contentSize.height
-        )
-        container.wantsLayer = true
-        container.layer?.backgroundColor = KiroTheme.background.cgColor
-        container.autoresizingMask = [.width, .height]
-        content.addSubview(container)
-
-        panels = [
-            ("overview", overview.view),
-            ("rules", rules.view),
-            ("learning", learning.view),
-            ("logs", logs.view),
-            ("ai", ai.view),
-            ("settings", settings.view),
-        ]
-        for (_, view) in panels {
-            view.frame = container.bounds
-            view.autoresizingMask = [.width, .height]
-            container.addSubview(view)
-        }
-
-        buildSidebar(in: sidebar)
-        window.contentView = content
+        host = NSHostingView(rootView: AppShellView(model: model))
+        host.frame = NSRect(origin: .zero, size: contentSize)
+        host.autoresizingMask = [.width, .height]
+        window.contentView = host
         window.center()
-        showPanel(0)
 
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self, self.window.isVisible, self.panels.indices.contains(3),
-                  !self.panels[3].1.isHidden else { return }
-            self.logs.tick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-
-    private func buildSidebar(in sidebar: NSView) {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 3
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 24),
-        ])
-
-        func addItem(_ identifier: String, _ title: String, _ symbol: String) {
-            let item = KiroSidebarItem(title: title, symbol: symbol)
-            item.onClick = { [weak self] in self?.selectTab(identifier) }
-            stack.addArrangedSubview(item)
-            item.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-            sidebarItems.append((identifier, item))
-        }
-
-        func addHeader(_ title: String, beforeSpacing: CGFloat) {
-            let header = kiroSidebarHeader(title)
-            header.translatesAutoresizingMaskIntoConstraints = false
-            stack.addArrangedSubview(header)
-            stack.setCustomSpacing(beforeSpacing, after: stack.arrangedSubviews.dropLast().last ?? header)
-        }
-
-        addItem("overview", "开始", "paintbrush.pointed")
-        addHeader("功能", beforeSpacing: 18)
-        addItem("rules", "CLI 补全", "terminal")
-        addItem("learning", "学习", "wand.and.stars")
-        addItem("logs", "日志", "doc.text.magnifyingglass")
-        addHeader("设置", beforeSpacing: 20)
-        addItem("ai", "AI 补全", "sparkles")
-        addItem("settings", "设置", "gearshape")
     }
 
     func show() {
@@ -2245,38 +2155,19 @@ final class MainWindowController: NSObject {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)
         NSApp.activate(ignoringOtherApps: true)
+        onVisibilityChanged?(true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onVisibilityChanged?(false)
     }
 
     func selectTab(_ identifier: String) {
-        guard let index = panels.firstIndex(where: { $0.0 == identifier }) else { return }
-        showPanel(index)
-    }
-
-    private func showPanel(_ index: Int) {
-        guard index >= 0, index < panels.count else { return }
-        for (position, entry) in panels.enumerated() {
-            entry.1.frame = container.bounds
-            entry.1.isHidden = position != index
-        }
-        for (identifier, item) in sidebarItems {
-            item.isSelected = identifier == panels[index].0
-        }
-        switch panels[index].0 {
-        case "overview": overview.refresh()
-        case "rules": rules.refresh()
-        case "learning": learning.refresh()
-        case "logs": logs.refresh(force: true)
-        case "ai": ai.refresh()
-        case "settings": settings.refresh()
-        default: break
-        }
+        model.selected = identifier
     }
 
     @objc func refreshAll() {
-        overview.refresh()
-        rules.refresh()
-        learning.refresh()
-        logs.refresh(force: true)
+        model.refreshAll()
     }
 
     @objc func showLogs() {
@@ -2291,6 +2182,72 @@ final class MainWindowController: NSObject {
             attributes: [.posixPermissions: 0o700]
         )
         NSWorkspace.shared.open(url)
+    }
+}
+
+// MARK: - Menu bar
+
+final class MenuBarController: NSObject, NSMenuDelegate {
+    private let controller: MainWindowController
+    private var statusItem: NSStatusItem?
+
+    init(controller: MainWindowController) {
+        self.controller = controller
+        super.init()
+    }
+
+    func start() {
+        guard statusItem == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            let image = NSImage(systemSymbolName: "bolt.horizontal.circle", accessibilityDescription: "Offline Complete")
+            image?.isTemplate = true
+            button.image = image
+            if image == nil {
+                button.title = "OC"
+            }
+            button.toolTip = "Offline Complete"
+            button.imagePosition = .imageOnly
+        }
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        statusItem = item
+    }
+
+    func stop() {
+        guard let item = statusItem else { return }
+        NSStatusBar.system.removeStatusItem(item)
+        statusItem = nil
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let learning = loadLearning()
+        addMetric("选择记录", "\(learning.entries.count) 条", to: menu)
+        addMetric("个人纠正", "\(learning.personal.count) 条", to: menu)
+        addMetric("学习状态", learning.learning ? "已启用" : "已关闭", to: menu)
+        menu.addItem(.separator())
+        let open = NSMenuItem(title: "打开主界面", action: #selector(openMain), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+        let quit = NSMenuItem(title: "退出 Offline Complete", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+    }
+
+    private func addMetric(_ title: String, _ value: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: "\(title)：\(value)", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
+    @objc private func openMain() {
+        controller.show()
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
     }
 }
 
@@ -2327,6 +2284,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = MainWindowController()
     let screenshotPath: String?
     let initialTab: String?
+    private var menuBarController: MenuBarController?
+    private var mainWindowVisible = false
 
     init(screenshotPath: String?, initialTab: String?) {
         self.screenshotPath = screenshotPath
@@ -2339,11 +2298,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = makeAppIcon()
+        controller.onVisibilityChanged = { [weak self] visible in
+            self?.mainWindowVisible = visible
+            self?.updateActivationPolicy()
+        }
         if let initialTab {
             controller.selectTab(initialTab)
         }
         controller.show()
-        controller.refreshAll()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(menuBarSettingChanged),
+            name: .menuBarSettingChanged,
+            object: nil
+        )
+        syncMenuBar()
         let controller = self.controller
         DispatchQueue.main.async {
             if let error = ensureCommandLineIntegration() {
@@ -2353,8 +2322,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "好")
                 alert.runModal()
-            } else {
-                controller.refreshAll()
             }
         }
         if let path = screenshotPath, let view = controller.window.contentView {
@@ -2374,8 +2341,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) {
-        controller.refreshAll()
+    @objc private func menuBarSettingChanged() {
+        syncMenuBar()
+    }
+
+    private func syncMenuBar() {
+        if loadMenuBarSetting() {
+            if menuBarController == nil {
+                menuBarController = MenuBarController(controller: controller)
+            }
+            menuBarController?.start()
+        } else {
+            menuBarController?.stop()
+        }
+        updateActivationPolicy()
+    }
+
+    private func updateActivationPolicy() {
+        let menuBarEnabled = loadMenuBarSetting()
+        // The main window behaves like a normal app while open. With the
+        // menu-bar item enabled, closing it returns the process to background
+        // mode and removes the Dock/Launchpad icon.
+        let regular = mainWindowVisible || !menuBarEnabled
+        NSApp.setActivationPolicy(regular ? .regular : .accessory)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -2528,7 +2516,6 @@ var initialTab: String?
 if let index = CommandLine.arguments.firstIndex(of: "--tab"), index + 1 < CommandLine.arguments.count {
     initialTab = CommandLine.arguments[index + 1]
 }
-
 let application = NSApplication.shared
 let delegate = AppDelegate(screenshotPath: screenshotPath, initialTab: initialTab)
 application.delegate = delegate

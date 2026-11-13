@@ -5,12 +5,11 @@
 ```bash
 make test-all     # 先构建 bin/，再跑全量测试
 make dist         # 生成 dist/Offline Complete.app、zip、dmg
-make pkg          # 在 dist/ 生成 Offline-Complete.pkg
 ```
 
-`make dist` 使用 ad-hoc 签名（`codesign --sign -`），没有 Developer ID，也没有公证。`make pkg` 生成未签名的系统安装包；本地可以安装，但从网络分发时 Gatekeeper 会提示未验证开发者。DMG 里的应用首次启动会自安装用户级命令和 zsh 集成。构建需要 `swiftc` 和 Go 1.27.3。
+`make dist` 使用本地自签名开发证书 `Offline Complete Dev`，证书和密码文件在 `~/Library/Keychains/offline-complete-dev.keychain-db` 与 `~/Library/Application Support/offline-complete/signing/`，首次构建自动创建。它不是 Developer ID，也没有公证；从网络分发时 Gatekeeper 会提示未验证开发者。好处是重建后的 designated requirement 仍绑定同一证书，辅助功能等 TCC 权限不会因为 cdhash 变化而失效；从 ad-hoc 切换到该证书后需要重新授权一次。DMG 里的应用首次启动会自安装用户级命令和 zsh 集成。构建需要 `swiftc` 和 Go 1.27.3。
 
-## DMG 安装（无需 pkg）
+## DMG 安装
 
 ```bash
 make dist
@@ -23,44 +22,6 @@ open dist/Offline-Complete.dmg
 把应用拖到 `~/Applications` 不需要管理员权限；拖到 `/Applications` 由 Finder 决定是否要求管理员权限。
 
 不需要再执行 `scripts/install.sh`。DMG 中的“安装说明.txt”包含同样步骤。
-
-## 系统安装包（推荐用于系统级安装）
-
-```bash
-make pkg
-open dist/Offline-Complete.pkg
-# 或
-sudo installer -pkg dist/Offline-Complete.pkg -target /
-```
-
-安装器需要管理员权限，会：
-
-- 把 `Offline Complete.app` 安装到 `/Applications/`；
-- 把 `oc`、`oc-app`、`oc-manage`、`oc-window`、`oc-client` 安装到 `/usr/local/bin/`；
-- 如果 `/usr/local/bin` 中已有同名且不是本应用生成的命令，preinstall 会中止并提示，不会覆盖。
-
-安装器还会在控制台用户的 `~/.zshrc` 顶部写入带标记的自动启动块。之后**新开的交互式 zsh 窗口会在主应用运行时自动进入补全会话**，不需要手动输入 `oc`。关闭主窗口不会退出应用，补全继续工作；真正退出应用后自动启动停止，现有已打开的 shell 会隐藏候选窗口。`oc` 命令仍然保留。
-
-```bash
-open "/Applications/Offline Complete.app"
-# 新开一个 zsh 窗口，输入 git
-```
-
-查看或移除自动启动：
-
-```bash
-oc-manage shell status
-oc-manage shell uninstall
-oc-manage shell install      # 重新启用
-```
-
-卸载：
-
-```bash
-sudo scripts/uninstall-pkg.sh
-```
-
-用户数据、日志和设置不会删除。
 
 ## 用户级安装（无需管理员）
 
@@ -107,7 +68,7 @@ https://api.anthropic.com/v1/messages
 管理窗口：
 
 ```bash
-# 系统安装包
+# DMG 安装
 open "/Applications/Offline Complete.app"
 # 用户级安装
 open "$HOME/Applications/Offline Complete.app"
@@ -115,7 +76,7 @@ open "$HOME/Applications/Offline Complete.app"
 oc-app
 ```
 
-它会出现在 Dock，包含“概览 / 规则 / 学习 / 日志 / 设置”五页；候选窗口与它分离，不会出现在 Dock。关闭管理窗口后应用仍在 Dock 中，点击图标可重新打开。“设置”页可开关日志、修改日志目录和保留天数。默认日志目录是 `~/.oc/logs`，详见 [LOGGING.md](LOGGING.md)。
+它默认不显示 Dock/启动台图标，在菜单栏常驻，包含“开始 / 本地学习 / 日志 / AI 补全 / 设置”五页；点击菜单栏图标可以查看指标、打开主界面或退出。候选窗口与它分离，不会出现在 Dock。关闭管理窗口后应用仍在后台运行，可从菜单栏重新打开；主窗口打开时显示 Dock 图标，关闭后回到后台。“设置”页可开关菜单栏常驻、日志、修改日志目录和保留天数。默认日志目录是 `~/.oc/logs`，详见 [LOGGING.md](LOGGING.md)。
 
 首次使用光标定位：
 
@@ -124,6 +85,8 @@ oc-window --accessibility-prompt
 ```
 
 然后在“系统设置 → 隐私与安全性 → 辅助功能”中允许 `oc-window`。未授权时窗口固定在主屏右上角。
+
+管理窗口“开始”页的“系统权限”区块会持续显示这三项权限的状态：辅助功能（必需）、输入监控、屏幕录制。未开启的项能直接打开对应的系统设置页；授权后回到窗口会自动刷新，也可以点“刷新”手动重新检测。
 
 ## 卸载
 
@@ -135,8 +98,8 @@ scripts/uninstall.sh
 
 ```bash
 oc-manage clear --yes
-rm -rf "$HOME/Library/Application Support/offline-complete"
-rm -rf "$HOME/.oc"          # 日志设置和日志；会一并删除
+rm -rf "$HOME/.oc"          # 学习数据、日志设置和日志；会一并删除
+rm -rf "$HOME/Library/Application Support/offline-complete"  # 旧版学习数据和运行数据
 ```
 
 ## 与 Kiro 共存
@@ -155,4 +118,4 @@ rm -rf "$HOME/.oc"          # 日志设置和日志；会一并删除
 
 ## 签名与 Gatekeeper
 
-当前产物是 ad-hoc 签名、未公证的开发构建。从网络下载后 Gatekeeper 可能阻止首次打开；正式发布必须使用 Developer ID 签名并公证，步骤见 [RELEASE.md](RELEASE.md)。
+当前产物使用本地自签名开发证书、未公证。证书只在本机可用，TCC 权限可以跨重建保留；从网络下载后 Gatekeeper 仍可能阻止首次打开。正式发布必须使用 Developer ID 签名并公证，步骤见 [RELEASE.md](RELEASE.md)。

@@ -14,6 +14,7 @@ const MaxMessage = 64 * 1024
 type Item struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
+	Path        string `json:"path,omitempty"`
 }
 
 // OfferMessage replaces the interface's current candidate list.

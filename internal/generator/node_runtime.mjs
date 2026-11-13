@@ -16,6 +16,7 @@ import { createInterface } from "node:readline";
 
 const modules = new Map();
 const caches = new Map();
+const generatorStates = new WeakMap();
 const pendingSpecs = new Map();
 let nextSpecRequest = 0;
 const DEFAULT_TIMEOUT = 700;
@@ -197,6 +198,15 @@ function cacheKey(generator, context) {
   });
 }
 
+// A generator result belongs to one argument position. The trigger callback
+// compares the current search term with the previous one; reusing the previous
+// result when it returns false is what lets filepaths/folders keep their list
+// while the user types. Keep the scope in the cache so moving to another
+// argument or directory always reruns the generator.
+function generatorScope(context) {
+  return `${context.currentWorkingDirectory}\0${context.tokens.slice(0, -1).join("\0")}`;
+}
+
 function getCache(key, ttl) {
   const entry = caches.get(key);
   if (!entry) return undefined;
@@ -283,6 +293,43 @@ async function ocCommand(args) {
     return { stdout: "", stderr: String(error), code: 1 };
   }
 }
+// filepaths/folders specs in the upstream pack commonly call "ls -1ApL" for
+// every keystroke. Spawning a process just to list one directory dominates the
+// warm completion time, so reproduce that exact common shape with fs. Any
+// operand, unusual flag or error falls back to the real command.
+function fastLs(args, cwd) {
+  if (!Array.isArray(args) || !args.length || typeof cwd !== "string" || !cwd) return undefined;
+  let flags = "";
+  for (const arg of args) {
+    if (typeof arg !== "string" || !arg.startsWith("-") || arg.startsWith("--")) return undefined;
+    flags += arg.slice(1);
+  }
+  if (!flags.includes("1") || !flags.includes("p")) return undefined;
+  const allowed = new Set(["1", "A", "p", "L"]);
+  for (const flag of flags) if (!allowed.has(flag)) return undefined;
+  let entries;
+  try {
+    entries = fs.readdirSync(cwd, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  const showHidden = flags.includes("A");
+  const followLinks = flags.includes("L");
+  const lines = [];
+  for (const entry of entries) {
+    if (!showHidden && entry.name.startsWith(".")) continue;
+    let directory = entry.isDirectory();
+    if (!directory && followLinks && entry.isSymbolicLink()) {
+      try {
+        directory = fs.statSync(path.join(cwd, entry.name)).isDirectory();
+      } catch { /* broken link: keep it as a file */ }
+    }
+    lines.push(entry.name + (directory ? "/" : ""));
+  }
+  lines.sort((a, b) => a.localeCompare(b));
+  return lines.join("\n");
+}
+
 function executeCommand(options, context) {
   const command = Array.isArray(options?.command)
     ? options.command
@@ -298,6 +345,10 @@ function executeCommand(options, context) {
   const executable = command[0];
   if (executable === "oc") return ocCommand(args);
   const cwd = typeof options?.cwd === "string" ? options.cwd : context.currentWorkingDirectory;
+  if (executable === "ls") {
+    const stdout = fastLs(args, cwd);
+    if (stdout !== undefined) return Promise.resolve({ stdout, stderr: "", code: 0 });
+  }
   const timeout = Math.max(50, Math.min(Number(options?.timeout) || 700, 5000));
   return new Promise((resolve) => {
     let settled = false;
@@ -308,7 +359,10 @@ function executeCommand(options, context) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ stdout: limitText(stdout), stderr: limitText(stderr), code });
+      // Command output usually ends with a newline. Generators commonly split
+      // it on "\n" without filtering, so a trailing empty entry can throw.
+      const clean = (value) => limitText(value).replace(/\r?\n+$/, "");
+      resolve({ stdout: clean(stdout), stderr: clean(stderr), code });
     };
     const timer = setTimeout(() => {
       try { child?.kill("SIGKILL"); } catch { /* already gone */ }
@@ -337,7 +391,7 @@ function executeCommand(options, context) {
   });
 }
 
-function normalizeCandidate(value) {
+function normalizeCandidate(value, context) {
   if (typeof value === "string") {
     const name = value.trim();
     return name ? { name } : undefined;
@@ -347,15 +401,29 @@ function normalizeCandidate(value) {
   if (!name && typeof value.displayName === "string") name = value.displayName.trim();
   if (!name) return undefined;
   const candidate = { name };
-  if (typeof value.description === "string" && value.description.trim()) candidate.description = value.description.trim();
+  if (typeof value.description === "string" && value.description.trim()) {
+    candidate.description = value.description.trim();
+  } else if (value.type === "folder") {
+    candidate.description = "目录";
+  } else if (value.type === "file") {
+    candidate.description = "文件";
+  }
   if (typeof value.insertValue === "string" && value.insertValue.trim()) candidate.insertValue = value.insertValue.trim();
+  if (typeof value.path === "string" && value.path.trim()) {
+    candidate.path = value.path.trim();
+  } else if (value.type === "file" || value.type === "folder" || name.endsWith("/")) {
+    const relative = name.replace(/\/+$/, "");
+    if (relative) {
+      candidate.path = path.resolve(context?.currentWorkingDirectory || process.cwd(), relative);
+    }
+  }
   return candidate;
 }
 
-function normalizeList(value) {
+function normalizeList(value, context) {
   const result = [];
   for (const item of items(value)) {
-    const candidate = normalizeCandidate(item);
+    const candidate = normalizeCandidate(item, context);
     if (candidate) result.push(candidate);
     if (result.length >= MAX_CANDIDATES) break;
   }
@@ -363,9 +431,10 @@ function normalizeList(value) {
 }
 
 function matches(name, query, fuzzy) {
-  if (!query || name.startsWith(query)) return true;
-  if (!fuzzy) return false;
+  if (!query) return true;
   const needle = query.toLowerCase();
+  if (name.toLowerCase().startsWith(needle)) return true;
+  if (!fuzzy) return false;
   const haystack = name.toLowerCase();
   let index = 0;
   for (const char of haystack) {
@@ -419,66 +488,84 @@ function templateCandidates(template, token, cwd) {
   }
   entries.sort((a, b) => a.name.localeCompare(b.name));
   const result = [];
+  const foldedQuery = query.toLowerCase();
   for (const entry of entries) {
     if (entry.name.startsWith(".") && !query.startsWith(".")) continue;
-    if (!entry.name.startsWith(query)) continue;
+    if (!entry.name.toLowerCase().startsWith(foldedQuery)) continue;
     if (foldersOnly && !entry.isDirectory()) continue;
     if (filesOnly && !entry.isFile() && !entry.isDirectory()) continue;
     const name = dirPart + entry.name + (entry.isDirectory() ? "/" : "");
-    result.push({ name, description: entry.isDirectory() ? "目录" : "文件" });
+    result.push({
+      name,
+      description: entry.isDirectory() ? "目录" : "文件",
+      path: path.join(directory, entry.name),
+    });
     if (result.length >= MAX_CANDIDATES) break;
   }
   return result;
 }
 
-async function runOne(generator, rawToken, query, previousToken, context) {
-  if (!shouldRun(generator, rawToken, previousToken, context)) return [];
-  if (generator.template !== undefined) {
-    return templateCandidates(generator.template, rawToken, context.currentWorkingDirectory);
+async function runOne(generator, rawToken, query, context) {
+  const scope = generatorScope(context);
+  const previous = generatorStates.get(generator);
+  if (previous && previous.scope === scope && !shouldRun(generator, rawToken, previous.token, context)) {
+    return previous.result.map((candidate) => ({ ...candidate }));
   }
-  if (generator.custom) {
+
+  let result = [];
+  if (generator.template !== undefined) {
+    result = templateCandidates(generator.template, rawToken, context.currentWorkingDirectory);
+  } else if (generator.custom) {
     try {
       const generatorContext = { ...context.generatorContext, searchTerm: rawToken };
       const value = await generator.custom(context.tokens, (options) => executeCommand(options, context), generatorContext);
-      return normalizeList(value);
+      result = normalizeList(value, context);
     } catch {
-      return [];
+      result = [];
     }
-  }
-  if (generator.script) {
+  } else if (generator.script) {
     const ttl = Number(generator.cache?.ttl) || 0;
     const key = cacheKey(generator, context);
     if (ttl > 0) {
       const cached = getCache(key, ttl);
-      if (cached) return cached;
+      if (cached) {
+        result = cached;
+      }
     }
-    let script = generator.script;
-    try {
-      if (typeof script === "function") script = await script(context.tokens);
-    } catch {
-      return [];
-    }
-    let options;
-    if (Array.isArray(script)) options = { command: script[0], args: script.slice(1), cwd: context.currentWorkingDirectory };
-    else if (script && typeof script === "object") options = script;
-    if (!options || !options.command) return [];
-    const timeout = Math.max(DEFAULT_TIMEOUT, Number(generator.scriptTimeout) || 0, Number(options.timeout) || 0);
-    const output = await executeCommand({ ...options, timeout }, context);
-    let values;
-    if (generator.postProcess) {
+    if (!result.length) {
+      let script = generator.script;
       try {
-        values = await generator.postProcess(output.stdout, context.tokens);
+        if (typeof script === "function") script = await script(context.tokens);
       } catch {
         return [];
       }
-    } else {
-      values = splitOutput(output.stdout, generator.splitOn);
+      let options;
+      if (Array.isArray(script)) options = { command: script[0], args: script.slice(1), cwd: context.currentWorkingDirectory };
+      else if (script && typeof script === "object") options = script;
+      if (!options || !options.command) return [];
+      const timeout = Math.max(DEFAULT_TIMEOUT, Number(generator.scriptTimeout) || 0, Number(options.timeout) || 0);
+      const output = await executeCommand({ ...options, timeout }, context);
+      let values;
+      if (generator.postProcess) {
+        try {
+          values = await generator.postProcess(output.stdout, context.tokens);
+        } catch {
+          return [];
+        }
+      } else {
+        values = splitOutput(output.stdout, generator.splitOn);
+      }
+      result = normalizeList(values, context);
+      if (ttl > 0) setCache(key, result);
     }
-    const result = normalizeList(values);
-    if (ttl > 0) setCache(key, result);
-    return result;
   }
-  return [];
+
+  generatorStates.set(generator, {
+    scope,
+    token: rawToken,
+    result: result.map((candidate) => ({ ...candidate })),
+  });
+  return result;
 }
 
 async function loadModule(source) {
@@ -492,11 +579,11 @@ async function loadModule(source) {
 
 async function complete(request) {
   const module = await loadModule(request.source);
+  if (request.kind === "load") return [];
   const spec = module.default;
   if (!spec || typeof spec !== "object") throw new Error("spec has no default object");
   const tokens = Array.isArray(request.tokens) ? request.tokens.map(String) : [];
   const token = currentToken(tokens, request.prefix ?? "");
-  const previousToken = tokens.length > 1 ? tokens[tokens.length - 2] : "";
   const context = {
     tokens,
     tokenArray: tokens,
@@ -555,10 +642,10 @@ async function complete(request) {
   for (const generator of generators) {
     const query = queryTerm(generator, token, context);
     const queryPrefix = query && token.endsWith(query) ? token.slice(0, token.length - query.length) : "";
-    for (const candidate of await runOne(generator, token, query, previousToken, context)) {
+    for (const candidate of await runOne(generator, token, query, context)) {
       if (!candidate.name || seen.has(candidate.name)) continue;
       if (!matches(candidate.name, query, request.filterStrategy === "fuzzy")) continue;
-      if (queryPrefix && !candidate.name.startsWith(queryPrefix)) {
+      if (queryPrefix && !candidate.name.toLowerCase().startsWith(queryPrefix.toLowerCase())) {
         candidate.name = queryPrefix + candidate.name;
         if (candidate.insertValue) candidate.insertValue = queryPrefix + candidate.insertValue;
       }

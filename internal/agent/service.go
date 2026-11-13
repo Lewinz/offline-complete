@@ -21,6 +21,7 @@ const (
 	NavigationNext Navigation = iota + 1
 	NavigationPrevious
 	NavigationAccept
+	NavigationInsert
 	NavigationDismiss
 )
 
@@ -38,16 +39,24 @@ type Service struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	mu               sync.Mutex
-	focused          bool
-	lastVersion      uint64
-	dismissedVersion uint64
-	offerVersion     uint64
-	offerID          uint64
-	selected         int
-	count            int
-	active           bool
-	suppressUntil    time.Time
+	mu                sync.Mutex
+	focused           bool
+	lastVersion       uint64
+	dismissedVersion  uint64
+	offerVersion      uint64
+	offerID           uint64
+	selected          int
+	count             int
+	active            bool
+	exactMatchExecute bool
+	suppressUntil     time.Time
+	haveContent       bool
+	lastLine          string
+	lastCursor        int
+	lastCWD           string
+	offerLine         string
+	offerCursor       int
+	offerCWD          string
 }
 
 // NewService starts the interface writer. The connection must be authenticated
@@ -57,12 +66,13 @@ func NewService(session *Session, state *editstate.State, conn net.Conn) (*Servi
 		return nil, errors.New("invalid completion service")
 	}
 	service := &Service{
-		session: session,
-		state:   state,
-		conn:    conn,
-		out:     make(chan []byte, 1),
-		done:    make(chan struct{}),
-		focused: true,
+		session:           session,
+		state:             state,
+		conn:              conn,
+		out:               make(chan []byte, 1),
+		done:              make(chan struct{}),
+		focused:           true,
+		exactMatchExecute: true,
 	}
 	go service.sendLoop()
 	return service, nil
@@ -75,8 +85,14 @@ func (s *Service) Refresh() { s.refresh(false) }
 
 func (s *Service) refresh(force bool) {
 	version := s.state.Version()
+	snapshot, present := s.state.Snapshot()
 	s.mu.Lock()
 	if time.Now().Before(s.suppressUntil) {
+		s.lastVersion = version
+		s.haveContent = present
+		s.lastLine = snapshot.Line
+		s.lastCursor = snapshot.Cursor
+		s.lastCWD = snapshot.CWD
 		s.mu.Unlock()
 		s.enqueue(ClearMessage{Type: "clear", Version: version})
 		return
@@ -85,11 +101,28 @@ func (s *Service) refresh(force bool) {
 		s.mu.Unlock()
 		return
 	}
+	// ZLE can redraw for an unchanged buffer. Recomputing and resending the
+	// offer would reset the selected row, so keep the current UI state.
+	if !force && s.haveContent && present && s.lastLine == snapshot.Line &&
+		s.lastCursor == snapshot.Cursor && s.lastCWD == snapshot.CWD {
+		s.lastVersion = version
+		s.mu.Unlock()
+		return
+	}
 	focused := s.focused
 	s.lastVersion = version
+	s.haveContent = present
+	s.lastLine = snapshot.Line
+	s.lastCursor = snapshot.Cursor
+	s.lastCWD = snapshot.CWD
 	s.mu.Unlock()
 
 	offer, offerID, ok := s.session.Refresh(focused)
+	if s.state.Version() != version {
+		// The shell moved on while the generator ran. Do not show a stale
+		// offer; the queued refresh will publish the newest snapshot.
+		return
+	}
 	if !ok {
 		s.mu.Lock()
 		s.active = false
@@ -112,12 +145,15 @@ func (s *Service) refresh(force bool) {
 	s.offerID = offerID
 	s.selected = 0
 	s.count = len(offer.Candidates)
+	s.offerLine = snapshot.Line
+	s.offerCursor = snapshot.Cursor
+	s.offerCWD = snapshot.CWD
 	s.active = true
 	s.mu.Unlock()
 
 	items := make([]Item, len(offer.Candidates))
 	for i, candidate := range offer.Candidates {
-		items[i] = Item{Name: candidate.Name, Description: candidate.Description}
+		items[i] = Item{Name: candidate.Name, Description: candidate.Description, Path: candidate.Path}
 	}
 	s.enqueue(OfferMessage{Type: "offer", Version: version, Offer: offerID, Selected: 0, Items: items})
 }
@@ -144,9 +180,12 @@ func (s *Service) Navigate(action Navigation) bool {
 		s.mu.Unlock()
 		return false
 	}
-	// An edit can advance the shell state between refreshes. Do not consume a
-	// key (especially Enter) for an offer that no longer describes the line.
-	if current := s.state.Version(); current != s.offerVersion {
+	// An edit can change the line between refreshes. Do not consume a key
+	// (especially Enter) for an offer that no longer describes the line. The
+	// shell sequence may advance for an unchanged redraw, so compare content.
+	snapshot, present := s.state.Snapshot()
+	if !present || snapshot.Line != s.offerLine || snapshot.Cursor != s.offerCursor || snapshot.CWD != s.offerCWD {
+		current := s.state.Version()
 		s.active = false
 		s.count = 0
 		s.mu.Unlock()
@@ -169,8 +208,21 @@ func (s *Service) Navigate(action Navigation) bool {
 		s.mu.Unlock()
 		s.enqueue(message)
 		return true
-	case NavigationAccept:
+	case NavigationAccept, NavigationInsert:
 		version, offer, index := s.offerVersion, s.offerID, s.selected
+		if action == NavigationAccept && s.exactMatchExecute && s.session.ExactMatch(index) {
+			// Kiro's "insert selected and execute" behavior: the selected
+			// candidate only adds a slash or repeats the token, so execute the
+			// line the user already typed instead of replacing it.
+			current := s.state.Version()
+			s.active = false
+			s.count = 0
+			s.mu.Unlock()
+			s.dropPending()
+			s.suppressAfterSelect()
+			s.enqueue(ClearMessage{Type: "clear", Version: current})
+			return false
+		}
 		s.active = false
 		s.count = 0
 		s.mu.Unlock()
@@ -247,6 +299,14 @@ func (s *Service) Serve() error {
 		return err
 	}
 	return io.EOF
+}
+
+// SetExactMatchExecute controls whether an exact match passes Enter through to
+// the shell instead of replacing the current token.
+func (s *Service) SetExactMatchExecute(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exactMatchExecute = enabled
 }
 
 func (s *Service) setFocus(focused bool) {

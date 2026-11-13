@@ -45,11 +45,13 @@ type Option struct {
 	Args        []Arg  `json:"args,omitempty"`
 }
 
-// Candidate is a single completable name with an optional description.
+// Candidate is a single completable name with an optional description and
+// filesystem path for file/folder candidates.
 type Candidate struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	InsertValue string `json:"insertValue,omitempty"`
+	Path        string `json:"path,omitempty"`
 }
 
 // Arg describes one positional argument and its dynamic value sources.

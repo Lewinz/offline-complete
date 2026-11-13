@@ -1,10 +1,6 @@
 package rules
 
-import (
-	"strings"
-
-	"offline-complete/internal/shellparse"
-)
+import "offline-complete/internal/shellparse"
 
 // CompleteContext returns static candidates only for a certain, explicitly
 // resolved context. It does not establish shell command identity or perform
@@ -32,7 +28,7 @@ func (p *RulePack) CompleteContext(ctx shellparse.Context) []Candidate {
 	var result []Candidate
 	if ctx.Kind == shellparse.Subcommand {
 		for _, command := range current.Subcommands {
-			if strings.HasPrefix(command.Name, ctx.Prefix) {
+			if hasPrefixFold(command.Name, ctx.Prefix) {
 				result = append(result, Candidate{Name: command.Name, Description: command.Description})
 			}
 		}
@@ -42,7 +38,7 @@ func (p *RulePack) CompleteContext(ctx shellparse.Context) []Candidate {
 			used[name] = true
 		}
 		for _, option := range current.Options {
-			if !used[option.Name] && strings.HasPrefix(option.Name, ctx.Prefix) {
+			if !used[option.Name] && hasPrefixFold(option.Name, ctx.Prefix) {
 				result = append(result, Candidate{Name: option.Name, Description: option.Description})
 			}
 		}

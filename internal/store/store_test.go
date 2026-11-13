@@ -112,6 +112,106 @@ func TestPrunesExpiredSelections(t *testing.T) {
 	}
 }
 
+func TestCorrectionNeedsRepeatedEvidence(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextKey := "cd\x00\x00pos\x000"
+	at := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	if err := data.RecordCorrection(contextKey, "Downloads/", "Documents/", at); err != nil {
+		t.Fatal(err)
+	}
+	if got := data.PersonalCandidates(contextKey, "Do", 10); len(got) != 0 {
+		t.Fatalf("one correction became a personal candidate: %+v", got)
+	}
+	if err := data.RecordCorrection(contextKey, "Downloads/", "Documents/", at.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.RecordCorrection(contextKey, "Downloads/", "Documents/", at.Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got := data.PersonalCandidates(contextKey, "Do", 10)
+	if len(got) != 1 || got[0].Value != "Downloads/" || got[0].Wins != 3 || got[0].Losses != 0 {
+		t.Fatalf("personal candidates = %+v", got)
+	}
+	if correction, ok := data.Correction(contextKey, "Documents/"); !ok || correction.Losses != 3 {
+		t.Fatalf("rejected correction = %+v ok=%v", correction, ok)
+	}
+}
+
+func TestExportImportRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC()
+	if err := data.Record("git\x00\x00sub\x000\x00commit", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.RecordCorrection("cd\x00\x00pos\x000", "work/", "tmp/", at); err != nil {
+		t.Fatal(err)
+	}
+	exported, err := data.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDir := t.TempDir()
+	if err := os.Chmod(otherDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other, err := store.Open(otherDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Import(exported); err != nil {
+		t.Fatal(err)
+	}
+	if selection, ok := other.Lookup("git\x00\x00sub\x000\x00commit"); !ok || selection.Count != 1 {
+		t.Fatalf("imported selection = %+v ok=%v", selection, ok)
+	}
+	if correction, ok := other.Correction("cd\x00\x00pos\x000", "work/"); !ok || correction.Wins != 1 {
+		t.Fatalf("imported correction = %+v ok=%v", correction, ok)
+	}
+}
+
+func TestMigratesLegacyLearningFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "Library", "Application Support", "offline-complete"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(home, "Library", "Application Support", "offline-complete", "learning.json")
+	if err := os.WriteFile(legacy, []byte(`{"schemaVersion":1,"learning":true,"selections":{"key":{"count":2,"last":"2026-11-10T12:00:00Z"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := store.DefaultDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(home, ".oc") {
+		t.Fatalf("default dir = %q", dir)
+	}
+	data, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection, ok := data.Lookup("key"); !ok || selection.Count != 2 {
+		t.Fatalf("migrated selection = %+v ok=%v", selection, ok)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".oc", "learning.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRejectsNonPrivateDirectory(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {

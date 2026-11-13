@@ -5,9 +5,12 @@ import "sort"
 // RankInput holds scores for a candidate already admitted by the caller's
 // matching and rule constraints. Inputs must be in base-ranking order.
 type RankInput struct {
-	Base          float64
-	SelectedCount uint64
-	Recency       float64
+	Base                 float64
+	SelectedCount        uint64
+	Recency              float64
+	CorrectionConfidence float64
+	CorrectionRecency    float64
+	CorrectionPenalty    float64
 }
 
 // Rank returns candidate indices in descending learned-score order, preserving
@@ -20,7 +23,7 @@ func Rank(inputs []RankInput) ([]int, error) {
 		order[i] = i
 	}
 	for i, input := range inputs {
-		score, err := Score(input.Base, input.SelectedCount, input.Recency)
+		score, err := ScoreWithCorrection(input.Base, input.SelectedCount, input.Recency, input.CorrectionConfidence, input.CorrectionRecency, input.CorrectionPenalty)
 		if err != nil {
 			return order, err
 		}

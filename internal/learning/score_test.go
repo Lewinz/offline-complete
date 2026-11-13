@@ -30,6 +30,39 @@ func TestScore(t *testing.T) {
 	}
 }
 
+func TestWilsonLowerRewardsConsistentCorrections(t *testing.T) {
+	if got := WilsonLower(0, 0, 1.645); got != 0 {
+		t.Fatalf("empty WilsonLower = %v", got)
+	}
+	one := WilsonLower(1, 0, 1.645)
+	three := WilsonLower(3, 0, 1.645)
+	five := WilsonLower(5, 0, 1.645)
+	if !(one < three && three < five) {
+		t.Fatalf("confidence should increase: one=%v three=%v five=%v", one, three, five)
+	}
+	if got := WilsonLower(1, 1, 1.645); got >= 0.5 {
+		t.Fatalf("mixed evidence confidence = %v", got)
+	}
+}
+
+func TestScoreWithCorrection(t *testing.T) {
+	plain, err := ScoreWithCorrection(1, 0, 0, 0, 0, 0)
+	if err != nil || plain != 1 {
+		t.Fatalf("plain = %v, %v", plain, err)
+	}
+	corrected, err := ScoreWithCorrection(1, 0, 0, 0.5, 1, 0)
+	if err != nil || corrected <= plain {
+		t.Fatalf("corrected = %v, %v", corrected, err)
+	}
+	penalized, err := ScoreWithCorrection(1, 0, 0, 0, 0, 0.2)
+	if err != nil || penalized >= plain {
+		t.Fatalf("penalized = %v, %v", penalized, err)
+	}
+	if _, err := ScoreWithCorrection(1, 0, 0, 1.1, 0, 0); err == nil {
+		t.Fatal("accepted invalid correction confidence")
+	}
+}
+
 func TestScoreRejectsInvalidLearningData(t *testing.T) {
 	for _, tc := range []struct {
 		base    float64

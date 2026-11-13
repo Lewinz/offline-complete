@@ -26,6 +26,31 @@ func TestNavigatorForwardsEverythingWithoutAnOffer(t *testing.T) {
 	}
 }
 
+func TestNavigatorObservesEnterWithoutAnOffer(t *testing.T) {
+	submits := 0
+	nav := &navigator{
+		can:      func() bool { return false },
+		on:       func(agent.Navigation) bool { return false },
+		onSubmit: func() { submits++ },
+	}
+	output := nav.Filter([]byte("cd foo\r"))
+	if string(output) != "cd foo\r" || submits != 1 {
+		t.Fatalf("output = %q submits = %d", output, submits)
+	}
+}
+
+func TestNavigatorDoesNotDoubleRecordAcceptedSelection(t *testing.T) {
+	submits := 0
+	nav := &navigator{
+		can:      func() bool { return true },
+		on:       func(agent.Navigation) bool { return true },
+		onSubmit: func() { submits++ },
+	}
+	if output := nav.Filter([]byte("\r")); len(output) != 0 || submits != 0 {
+		t.Fatalf("output = %q submits = %d", output, submits)
+	}
+}
+
 func TestNavigatorConsumesNavigationAndForwardsText(t *testing.T) {
 	var actions []agent.Navigation
 	nav := &navigator{
@@ -49,6 +74,32 @@ func TestNavigatorConsumesNavigationAndForwardsText(t *testing.T) {
 		agent.NavigationNext,
 		agent.NavigationDismiss,
 	}
+	if len(actions) != len(want) {
+		t.Fatalf("actions = %v", actions)
+	}
+	for index := range want {
+		if actions[index] != want[index] {
+			t.Fatalf("actions = %v, want %v", actions, want)
+		}
+	}
+}
+
+func TestNavigatorHonorsTabAcceptAndEnterExecute(t *testing.T) {
+	var actions []agent.Navigation
+	nav := &navigator{
+		can: func() bool { return true },
+		on: func(action agent.Navigation) bool {
+			actions = append(actions, action)
+			return true
+		},
+		tabAccept:    true,
+		enterExecute: true,
+	}
+	output := nav.Filter([]byte("\t\r"))
+	if string(output) != "\r" {
+		t.Fatalf("output = %q, want Enter passthrough", output)
+	}
+	want := []agent.Navigation{agent.NavigationInsert, agent.NavigationDismiss}
 	if len(actions) != len(want) {
 		t.Fatalf("actions = %v", actions)
 	}

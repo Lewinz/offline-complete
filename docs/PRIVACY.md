@@ -3,35 +3,37 @@
 ## 存储位置
 
 ```text
-~/Library/Application Support/offline-complete/
-├── learning.json     # 本地选择计数（0600）
-└── run/s-*/socket    # 运行中的会话 socket（目录 0700）
-
 ~/.oc/
-├── config.json       # 日志设置（0600）
+├── learning.json        # 选择计数和个人纠正（0600）
+├── learning.json.bak    # 导入前的自动备份（0600）
+├── learning-export.json # 默认导出位置（可选，0600）
+├── config.json          # 日志/AI 设置（0600）
 └── logs/
     └── agent-YYYY-MM-DD.log  # 诊断日志（0600，默认保留 3 天）
+
+~/Library/Application Support/offline-complete/
+├── learning.json        # 旧版本学习数据；首次打开时迁移到 ~/.oc
+└── run/s-*/socket       # 运行中的会话 socket（目录 0700）
 ```
 
 目录必须为当前用户私有（0700）；写入使用临时文件 + 原子 rename，文件权限 0600。
 
 ## 记录什么
 
-每条学习记录只包含：
+学习数据包含两类记录：
 
-- 已解析的命令 ID；
-- 子命令路径；
-- 候选类型（子命令 / 选项 / 位置参数）和槽位；
-- 候选名称；
-- 选择次数和最后一次选择时间。
+- 选择记录：已解析的命令 ID、子命令路径、候选类型和槽位、候选名称、选择次数和最后选择时间。
+- 个人纠正：同一上下文下用户实际提交的候选 token、胜/负次数、出现过的日期和最后时间。它用来在相同上下文下补回静态规则或 generator 没有提供的候选。
 
-不记录：完整命令行、参数值、路径、工作目录、环境变量、命令输出、密码或自由文本。候选名称本身可能包含敏感信息，因此学习可以随时关闭和清除。
+不记录完整命令行、环境变量或命令输出。个人纠正会保存参数 token，因此 token 本身可能包含路径或敏感值；数据只在本机、目录 0700、文件 0600，学习可以随时关闭、清除或导出。
 
 ## 保留与清除
 
 - 默认保留最近 90 天；打开或记录时清理过期条目。
 - `oc-manage learning off` 立即停止记录和排序；已有记录保留，直到清除。
-- `oc-manage clear --yes` 删除全部选择记录。
+- `oc-manage clear --yes` 删除全部选择记录和个人纠正。
+- `oc-manage learning export --file PATH` 导出；`import --file PATH` 导入前会备份当前文件。
+- `oc-manage backup export --file PATH` 导出完整 zip（学习数据、个人纠正、`config.json` 设置，可能包含 AI Key）；`backup import` 会验证哈希并在失败时尽量恢复旧文件。
 - 删除 `learning.json` 等价于清空学习数据；基础规则不受影响。
 
 ## 日志与 IPC

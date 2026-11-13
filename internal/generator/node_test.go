@@ -8,10 +8,108 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"offline-complete/internal/rules"
 )
+
+func TestNodeRunnerSequentialRequestsReuseTheSameProcess(t *testing.T) {
+	runner := NewNodeRunner()
+	if !runner.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer runner.Close()
+	runner.timeout = 2 * time.Second
+
+	source := `export default {name:"tool",subcommands:[{name:"one"},{name:"two"}]}`
+	for attempt := 0; attempt < 4; attempt++ {
+		start := time.Now()
+		got, err := runner.Complete(NodeRequest{
+			Source:  source,
+			Command: "tool",
+			Kind:    "subcommand",
+			Tokens:  []string{"tool", ""},
+		})
+		if err != nil {
+			t.Fatalf("request %d: %v", attempt, err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("request %d candidates = %#v", attempt, got)
+		}
+		if elapsed := time.Since(start); elapsed >= runner.timeout {
+			t.Fatalf("request %d took %v, expected a response before the timeout", attempt, elapsed)
+		}
+	}
+}
+
+func TestNodeRunnerKeepsFilepathGeneratorResultsWhileTyping(t *testing.T) {
+	runner := NewNodeRunner()
+	if !runner.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer runner.Close()
+
+	data, err := rules.LoadFile(filepath.Join("..", "..", "rules", "base.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack, err := rules.FromJSON(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &rules.SpecStore{Dir: filepath.Join("..", "..", "rules", "specs")}
+	source, err := store.Load(pack.Specs["cd"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"one", "two", "three", "Alpha", "beta"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		prefix string
+		want   string
+	}{
+		{"", "one/"},
+		{"o", "one/"},
+		{"tw", "two/"},
+		{"al", "Alpha/"},
+		{"BE", "beta/"},
+	} {
+		got, err := runner.Complete(NodeRequest{
+			Source:  string(source),
+			Command: "cd",
+			Kind:    "positional",
+			Prefix:  tc.prefix,
+			CWD:     dir,
+			Tokens:  []string{"cd", tc.prefix},
+		})
+		if err != nil {
+			t.Fatalf("prefix %q: %v", tc.prefix, err)
+		}
+		found := false
+		for _, candidate := range got {
+			if candidate.Name != tc.want {
+				continue
+			}
+			found = true
+			if candidate.Path != filepath.Join(dir, strings.TrimSuffix(tc.want, "/")) {
+				t.Fatalf("prefix %q path = %q, want %q", tc.prefix, candidate.Path, filepath.Join(dir, strings.TrimSuffix(tc.want, "/")))
+			}
+		}
+		if !found {
+			t.Fatalf("prefix %q candidates = %#v, missing %q", tc.prefix, got, tc.want)
+		}
+	}
+}
 
 func TestNodeRunnerExecutesKiroGitGenerator(t *testing.T) {
 	runner := NewNodeRunner()

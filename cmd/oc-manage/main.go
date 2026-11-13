@@ -34,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return status(stdout, stderr)
 	case "learning":
 		return learning(args[1:], stdout, stderr)
+	case "backup":
+		return backupCommand(args[1:], stdout, stderr)
 	case "clear":
 		return clear(args[1:], stdout, stderr)
 	case "doctor":
@@ -42,6 +44,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return logging(args[1:], stdout, stderr)
 	case "ai":
 		return aiCommand(args[1:], stdout, stderr)
+	case "autocomplete":
+		return autocomplete(args[1:], stdout, stderr)
+	case "menu-bar":
+		return menuBar(args[1:], stdout, stderr)
 	case "shell":
 		return shell(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -60,7 +66,11 @@ func usage(writer io.Writer) {
 commands:
   status              local data, learning and rules status
   learning on|off     enable or disable local learning
-  learning status     show the learning setting
+  learning status     show the learning setting and data path
+  learning export [--file PATH]
+  learning import [--file PATH]
+  backup export [--file PATH]  full learning + settings zip
+  backup import [--file PATH]
   clear --yes         delete all local learning selections
   logging status      show log settings and the current file
   logging status --json
@@ -69,6 +79,10 @@ commands:
   ai status           show optional AI settings
   ai set --enabled on|off --protocol openai|anthropic --url URL
          [--key KEY] [--clear-key] [--model MODEL] [--max-tokens N]
+  autocomplete status show candidate-window key settings
+  autocomplete set --tab next|accept --enter select|execute
+         [--exact-match-execute on|off]
+  menu-bar on|off|status  show or toggle the background menu bar item
   shell status        show zsh auto-integration state
   shell install       make new interactive zsh windows start through oc
   shell uninstall     remove the marked zsh block
@@ -93,6 +107,7 @@ func status(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "data: %s\n", stats.Path)
 	fmt.Fprintf(stdout, "learning: %t\n", stats.Learning)
 	fmt.Fprintf(stdout, "selections: %d\n", stats.Selections)
+	fmt.Fprintf(stdout, "corrections: %d\n", stats.Corrections)
 	fmt.Fprintf(stdout, "data bytes: %d\n", stats.Bytes)
 	printRules(stdout, stderr)
 	if window := config.WindowPath(); window != "" {
@@ -111,6 +126,10 @@ func status(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "logging: %t\n", cfg.Logging.Enabled)
 		fmt.Fprintf(stdout, "log dir: %s\n", cfg.Logging.Directory)
 		fmt.Fprintf(stdout, "log retention days: %d\n", cfg.Logging.RetentionDays)
+		fmt.Fprintf(stdout, "tab action: %s\n", cfg.Autocomplete.TabAction)
+		fmt.Fprintf(stdout, "enter action: %s\n", cfg.Autocomplete.EnterAction)
+		fmt.Fprintf(stdout, "exact match execute: %t\n", cfg.Autocomplete.ExactMatchExecute)
+		fmt.Fprintf(stdout, "menu bar: %t\n", cfg.MenuBar.Enabled)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		if path, installed, err := shellStatus(home); err == nil {
@@ -124,8 +143,8 @@ func status(stdout, stderr io.Writer) int {
 }
 
 func learning(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: oc-manage learning on|off|status")
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: oc-manage learning on|off|status|export|import")
 		return 2
 	}
 	local, err := openStore()
@@ -135,18 +154,115 @@ func learning(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "on", "off":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: oc-manage learning on|off|status")
+			return 2
+		}
 		if err := local.SetLearning(args[0] == "on"); err != nil {
 			fmt.Fprintf(stderr, "oc-manage: %v\n", err)
 			return 1
 		}
 		fmt.Fprintf(stdout, "learning: %t\n", local.Learning())
 	case "status":
-		fmt.Fprintf(stdout, "learning: %t\n", local.Learning())
+		stats := local.Stats()
+		fmt.Fprintf(stdout, "learning: %t\n", stats.Learning)
+		fmt.Fprintf(stdout, "data: %s\n", stats.Path)
+		fmt.Fprintf(stdout, "selections: %d\n", stats.Selections)
+		fmt.Fprintf(stdout, "corrections: %d\n", stats.Corrections)
+	case "export":
+		path := ""
+		if len(args) > 1 {
+			if len(args) != 3 || args[1] != "--file" {
+				fmt.Fprintln(stderr, "usage: oc-manage learning export [--file PATH]")
+				return 2
+			}
+			path = args[2]
+		}
+		if path == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(stderr, "oc-manage: %v\n", err)
+				return 1
+			}
+			path = filepath.Join(home, ".oc", "learning-export.json")
+		}
+		data, err := local.Export()
+		if err != nil {
+			fmt.Fprintf(stderr, "oc-manage: export: %v\n", err)
+			return 1
+		}
+		if err := writePrivateFile(path, data); err != nil {
+			fmt.Fprintf(stderr, "oc-manage: export: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "exported: %s\n", path)
+	case "import":
+		path := ""
+		if len(args) > 1 {
+			if len(args) != 3 || args[1] != "--file" {
+				fmt.Fprintln(stderr, "usage: oc-manage learning import [--file PATH]")
+				return 2
+			}
+			path = args[2]
+		}
+		if path == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(stderr, "oc-manage: %v\n", err)
+				return 1
+			}
+			path = filepath.Join(home, ".oc", "learning-export.json")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(stderr, "oc-manage: import: %v\n", err)
+			return 1
+		}
+		backup, err := local.Export()
+		if err != nil {
+			fmt.Fprintf(stderr, "oc-manage: import backup: %v\n", err)
+			return 1
+		}
+		stats := local.Stats()
+		if err := writePrivateFile(stats.Path+".bak", backup); err != nil {
+			fmt.Fprintf(stderr, "oc-manage: import backup: %v\n", err)
+			return 1
+		}
+		if err := local.Import(data); err != nil {
+			fmt.Fprintf(stderr, "oc-manage: import: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "imported: %s\n", path)
+		fmt.Fprintf(stdout, "backup: %s\n", stats.Path+".bak")
 	default:
-		fmt.Fprintln(stderr, "usage: oc-manage learning on|off|status")
+		fmt.Fprintln(stderr, "usage: oc-manage learning on|off|status|export|import")
 		return 2
 	}
 	return 0
+}
+
+func writePrivateFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".learning-*.tmp")
+	if err != nil {
+		return err
+	}
+	name := temp.Name()
+	defer os.Remove(name)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func clear(args []string, stdout, stderr io.Writer) int {
@@ -169,7 +285,7 @@ func clear(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "oc-manage: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "learning selections cleared")
+	fmt.Fprintln(stdout, "learning data cleared")
 	return 0
 }
 
@@ -204,6 +320,101 @@ func loadRules(path string) (*rules.RulePack, string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return pack, hex.EncodeToString(sum[:]), nil
+}
+
+func menuBar(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: oc-manage menu-bar on|off|status")
+		return 2
+	}
+	cfg, err := settings.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "oc-manage: settings: %v\n", err)
+	}
+	switch args[0] {
+	case "on":
+		cfg.MenuBar.Enabled = true
+	case "off":
+		cfg.MenuBar.Enabled = false
+	case "status":
+		fmt.Fprintf(stdout, "menu bar: %t\n", cfg.MenuBar.Enabled)
+		return 0
+	default:
+		fmt.Fprintln(stderr, "usage: oc-manage menu-bar on|off|status")
+		return 2
+	}
+	if err := settings.Save(cfg); err != nil {
+		fmt.Fprintf(stderr, "oc-manage: save menu bar setting: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "menu bar: %t\n", cfg.MenuBar.Enabled)
+	return 0
+}
+
+func autocomplete(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: oc-manage autocomplete status | set ...")
+		return 2
+	}
+	cfg, err := settings.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "oc-manage: settings: %v\n", err)
+	}
+	switch args[0] {
+	case "status":
+		fmt.Fprintf(stdout, "tab action: %s\n", cfg.Autocomplete.TabAction)
+		fmt.Fprintf(stdout, "enter action: %s\n", cfg.Autocomplete.EnterAction)
+		fmt.Fprintf(stdout, "exact match execute: %t\n", cfg.Autocomplete.ExactMatchExecute)
+		return 0
+	case "set":
+		fs := flag.NewFlagSet("autocomplete set", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		tab := fs.String("tab", "", "next|accept")
+		enter := fs.String("enter", "", "select|execute")
+		exact := fs.String("exact-match-execute", "", "on|off")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		if *tab == "" && *enter == "" && *exact == "" {
+			fmt.Fprintln(stderr, "oc-manage: autocomplete set requires --tab, --enter or --exact-match-execute")
+			return 2
+		}
+		if *tab != "" {
+			if *tab != "next" && *tab != "accept" {
+				fmt.Fprintln(stderr, "oc-manage: --tab must be next or accept")
+				return 2
+			}
+			cfg.Autocomplete.TabAction = *tab
+		}
+		if *enter != "" {
+			if *enter != "select" && *enter != "execute" {
+				fmt.Fprintln(stderr, "oc-manage: --enter must be select or execute")
+				return 2
+			}
+			cfg.Autocomplete.EnterAction = *enter
+		}
+		if *exact != "" {
+			switch *exact {
+			case "on", "true", "1":
+				cfg.Autocomplete.ExactMatchExecute = true
+			case "off", "false", "0":
+				cfg.Autocomplete.ExactMatchExecute = false
+			default:
+				fmt.Fprintln(stderr, "oc-manage: --exact-match-execute must be on or off")
+				return 2
+			}
+		}
+		if err := settings.Save(cfg); err != nil {
+			fmt.Fprintf(stderr, "oc-manage: save autocomplete settings: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "tab action: %s\nenter action: %s\nexact match execute: %t\n",
+			cfg.Autocomplete.TabAction, cfg.Autocomplete.EnterAction, cfg.Autocomplete.ExactMatchExecute)
+		return 0
+	default:
+		fmt.Fprintln(stderr, "usage: oc-manage autocomplete status | set ...")
+		return 2
+	}
 }
 
 func aiCommand(args []string, stdout, stderr io.Writer) int {
@@ -285,7 +496,7 @@ func doctor(stdout, stderr io.Writer) int {
 		problems++
 	} else {
 		stats := local.Stats()
-		fmt.Fprintf(stdout, "OK data: %s (learning=%t selections=%d)\n", stats.Path, stats.Learning, stats.Selections)
+		fmt.Fprintf(stdout, "OK data: %s (learning=%t selections=%d corrections=%d)\n", stats.Path, stats.Learning, stats.Selections, stats.Corrections)
 	}
 
 	if path := config.RulesPath(); path == "" {

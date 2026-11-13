@@ -92,8 +92,12 @@ func filterCandidates(candidates []rules.Candidate, prefix string, limit int, fu
 	return result
 }
 
+func hasPrefixFold(name, prefix string) bool {
+	return prefix == "" || strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix))
+}
+
 func matches(name, prefix string, fuzzy bool) bool {
-	if prefix == "" || strings.HasPrefix(name, prefix) {
+	if hasPrefixFold(name, prefix) {
 		return true
 	}
 	if !fuzzy {
@@ -128,7 +132,7 @@ func (r Runner) Complete(cwd string, generators []rules.Generator, prefix string
 	seen := make(map[string]bool)
 	var result []rules.Candidate
 	add := func(candidate rules.Candidate) {
-		if len(result) >= maxCandidates || candidate.Name == "" || !strings.HasPrefix(candidate.Name, prefix) || seen[candidate.Name] {
+		if len(result) >= maxCandidates || candidate.Name == "" || !hasPrefixFold(candidate.Name, prefix) || seen[candidate.Name] {
 			return
 		}
 		seen[candidate.Name] = true
@@ -226,7 +230,13 @@ func listTemplate(cwd, template, prefix string, limit int) []rules.Candidate {
 	if err != nil {
 		return nil
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	sort.Slice(entries, func(i, j int) bool {
+		left, right := strings.ToLower(entries[i].Name()), strings.ToLower(entries[j].Name())
+		if left == right {
+			return entries[i].Name() < entries[j].Name()
+		}
+		return left < right
+	})
 	var result []rules.Candidate
 	for _, entry := range entries {
 		if len(result) >= limit {
@@ -236,7 +246,7 @@ func listTemplate(cwd, template, prefix string, limit int) []rules.Candidate {
 		if strings.HasPrefix(name, ".") && !strings.HasPrefix(query, ".") {
 			continue
 		}
-		if !strings.HasPrefix(name, query) {
+		if !hasPrefixFold(name, query) {
 			continue
 		}
 		isDir := entry.IsDir()
@@ -249,7 +259,11 @@ func listTemplate(cwd, template, prefix string, limit int) []rules.Candidate {
 			candidate += "/"
 			description = "目录"
 		}
-		result = append(result, rules.Candidate{Name: candidate, Description: description})
+		fullPath := filepath.Join(dir, name)
+		if absolute, err := filepath.Abs(fullPath); err == nil {
+			fullPath = absolute
+		}
+		result = append(result, rules.Candidate{Name: candidate, Description: description, Path: fullPath})
 	}
 	return result
 }
