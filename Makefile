@@ -1,10 +1,14 @@
-# The desktop app does not load interactive shell profiles; use the user's
-# `g` Go version manager setup when `go` is not already on PATH.
-GO ?= $(shell . "$$HOME/.g/env" 2>/dev/null; command -v go)
+# Prefer the Go already on PATH (GitHub Actions installs it there). Fall back
+# to the local `g` version manager for machines that do not load shell profiles
+# in the desktop build environment.
+GO := $(shell command -v go 2>/dev/null)
+ifeq ($(strip $(GO)),)
+GO := $(shell . "$HOME/.g/env" 2>/dev/null; command -v go 2>/dev/null)
+endif
 GOFLAGS ?= -mod=vendor
 
 ifeq ($(strip $(GO)),)
-$(error go toolchain not found; source ~/.g/env or install Go)
+$(error go toolchain not found; install Go and put it on PATH)
 endif
 
 .PHONY: build test test-all vet bin arm64 node-runtime encrypt sign dist
