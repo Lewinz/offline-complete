@@ -16,6 +16,10 @@
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>oc-app</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>LSApplicationCategoryType</key>
