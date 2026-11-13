@@ -56,7 +56,9 @@ jobs:
           security unlock-keychain -p "$SIGNING_P12_PASSWORD" "$KEYCHAIN"
           security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$SIGNING_P12_PASSWORD" "$KEYCHAIN" >/dev/null
-          security find-identity -v -p codesigning "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db"
+          security default-keychain -s "$KEYCHAIN"
+          security find-identity -v -p codesigning
           printf '%s' "$SIGNING_P12_PASSWORD" > "$SIGN_DIR/keychain-password"
           chmod 0600 "$SIGN_DIR/keychain-password"
           echo "SIGN_IDENTITY=Offline Complete Dev" >> "$GITHUB_ENV"

@@ -22,7 +22,9 @@ PASS_FILE="$SIGN_DIR/keychain-password"
 # local certificate-generation path in that case.
 if [ "${OC_SIGN_IMPORTED:-}" = "1" ]; then
   security unlock-keychain -p "$(cat "$PASS_FILE")" "$KEYCHAIN"
-  codesign --force --deep --keychain "$KEYCHAIN" --sign "$IDENTITY" "$APP"
+  security list-keychains -d user -s "$KEYCHAIN" "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true
+  security default-keychain -s "$KEYCHAIN" >/dev/null 2>&1 || true
+  codesign --force --deep --sign "$IDENTITY" "$APP"
   exit 0
 fi
 
