@@ -21,7 +21,11 @@ func TestSwiftWindowCheckReceivesOffer(t *testing.T) {
 	if _, err := os.Stat(binary); err != nil {
 		t.Skip("bin/oc-window not built; run make bin")
 	}
-	root, err := os.MkdirTemp("", "oc-window-")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, ".oc-window-")
 	if err != nil {
 		t.Fatal(err)
 	}

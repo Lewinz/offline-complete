@@ -80,6 +80,7 @@ type agentRuntime struct {
 	tabAccept         bool
 	enterExecute      bool
 	exactMatchExecute bool
+	settingsAt        time.Time
 }
 
 func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *agentRuntime, err error) {
@@ -260,11 +261,12 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 		}
 	}
 	runtime.navigator = &navigator{
-		can:          runtime.hasOffer,
-		on:           runtime.navigate,
-		onSubmit:     runtime.recordSubmit,
-		tabAccept:    runtime.tabAccept,
-		enterExecute: runtime.enterExecute,
+		can:            runtime.hasOffer,
+		on:             runtime.navigate,
+		onSubmit:       runtime.recordSubmit,
+		tabAccept:      runtime.tabAccept,
+		enterExecute:   runtime.enterExecute,
+		reloadSettings: runtime.keySettings,
 	}
 	go runtime.refreshLoop()
 	if os.Getenv("OFFLINE_COMPLETE_NO_WINDOW") == "" {
@@ -406,6 +408,26 @@ func (r *agentRuntime) disableCompletion() {
 	if r.listener != nil {
 		_ = r.listener.Close()
 	}
+}
+
+func (r *agentRuntime) keySettings() (bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// The settings file is small, but avoid re-reading it for every pasted
+	// byte. A one-second cache still makes UI changes apply to the current
+	// terminal without requiring a restart.
+	if time.Since(r.settingsAt) >= time.Second {
+		r.settingsAt = time.Now()
+		if cfg, err := settings.Load(); err == nil {
+			r.tabAccept = cfg.Autocomplete.TabAction == "accept"
+			r.enterExecute = cfg.Autocomplete.EnterAction == "execute"
+			r.exactMatchExecute = cfg.Autocomplete.ExactMatchExecute
+			if r.service != nil {
+				r.service.SetExactMatchExecute(r.exactMatchExecute)
+			}
+		}
+	}
+	return r.tabAccept, r.enterExecute
 }
 
 func (r *agentRuntime) hasOffer() bool {

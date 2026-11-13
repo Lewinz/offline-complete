@@ -1159,6 +1159,7 @@ struct SettingsView: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                         .frame(width: 220)
+                        .onChange(of: tabAction) { _ in saveKeySettings() }
                     }
                     fieldRow("回车") {
                         Picker("", selection: $enterAction) {
@@ -1168,9 +1169,14 @@ struct SettingsView: View {
                         .labelsHidden()
                         .pickerStyle(.segmented)
                         .frame(width: 240)
+                        .onChange(of: enterAction) { _ in saveKeySettings() }
                     }
                     Toggle("精确匹配时直接执行", isOn: $exactMatch)
                         .disabled(enterAction == "execute")
+                        .onChange(of: exactMatch) { _ in saveKeySettings() }
+                    Text("按键修改会自动保存，并在当前终端约 1 秒内生效。")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: KiroTheme.muted))
                 }
 
                 settingsCard("日志") {
@@ -1259,17 +1265,7 @@ struct SettingsView: View {
     }
 
     private func save() {
-        let (keyCode, keyOutput) = runTool("oc-manage", [
-            "autocomplete", "set",
-            "--tab", tabAction,
-            "--enter", enterAction,
-            "--exact-match-execute", exactMatch ? "on" : "off",
-        ])
-        if keyCode != 0 {
-            message = keyOutput.isEmpty ? "保存按键设置失败" : keyOutput
-            isError = true
-            return
-        }
+        guard saveKeySettings() else { return }
         let (logCode, logOutput) = runTool("oc-manage", [
             "logging", "set",
             "--enabled", logEnabled ? "on" : "off",
@@ -1283,6 +1279,24 @@ struct SettingsView: View {
         }
         message = "已保存"
         isError = false
+    }
+
+    @discardableResult
+    private func saveKeySettings() -> Bool {
+        let (keyCode, keyOutput) = runTool("oc-manage", [
+            "autocomplete", "set",
+            "--tab", tabAction,
+            "--enter", enterAction,
+            "--exact-match-execute", exactMatch ? "on" : "off",
+        ])
+        if keyCode != 0 {
+            message = keyOutput.isEmpty ? "保存按键设置失败" : keyOutput
+            isError = true
+            return false
+        }
+        message = "补全按键已保存"
+        isError = false
+        return true
     }
 
     private func exportBackup() {

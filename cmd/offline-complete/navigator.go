@@ -11,11 +11,19 @@ import (
 // active, the chunk is returned untouched so the shell keeps its normal key
 // bindings.
 type navigator struct {
-	can          func() bool
-	on           func(agent.Navigation) bool
-	onSubmit     func()
-	tabAccept    bool
-	enterExecute bool
+	can            func() bool
+	on             func(agent.Navigation) bool
+	onSubmit       func()
+	tabAccept      bool
+	enterExecute   bool
+	reloadSettings func() (tabAccept bool, enterExecute bool)
+}
+
+func (n *navigator) keySettings() (bool, bool) {
+	if n.reloadSettings != nil {
+		return n.reloadSettings()
+	}
+	return n.tabAccept, n.enterExecute
 }
 
 func (n *navigator) Filter(chunk []byte) []byte {
@@ -32,6 +40,7 @@ func (n *navigator) Filter(chunk []byte) []byte {
 		}
 		return chunk
 	}
+	tabAccept, enterExecute := n.keySettings()
 	filtered := make([]byte, 0, len(chunk))
 	for index := 0; index < len(chunk); {
 		b := chunk[index]
@@ -69,7 +78,7 @@ func (n *navigator) Filter(chunk []byte) []byte {
 			}
 		case 0x09: // Tab
 			action := agent.NavigationNext
-			if n.tabAccept {
+			if tabAccept {
 				action = agent.NavigationInsert
 			}
 			if n.on(action) {
@@ -77,7 +86,7 @@ func (n *navigator) Filter(chunk []byte) []byte {
 				continue
 			}
 		case 0x0d: // Enter
-			if n.enterExecute {
+			if enterExecute {
 				// Clear the popup, but let the original Enter reach the shell.
 				n.on(agent.NavigationDismiss)
 				if n.onSubmit != nil {

@@ -74,7 +74,11 @@ func startTestAgent(t *testing.T, rulesJSON string) *testAgent {
 	if _, err := exec.LookPath("zsh"); err != nil {
 		t.Skip("zsh unavailable")
 	}
-	root, err := os.MkdirTemp("", "oc-agent-")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(home, ".oc-agent-")
 	if err != nil {
 		t.Fatal(err)
 	}

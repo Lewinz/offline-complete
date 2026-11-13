@@ -16,7 +16,11 @@ import (
 
 func privateBase(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "oc-ipc-")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(home, ".oc-ipc-")
 	if err != nil {
 		t.Fatal(err)
 	}
