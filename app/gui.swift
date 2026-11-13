@@ -729,7 +729,9 @@ func ensureCommandLineIntegration() -> String? {
     }
     let zshrc = AppPaths.home.appendingPathComponent(".zshrc")
     let text = (try? String(contentsOf: zshrc, encoding: .utf8)) ?? ""
-    if text.contains("# offline-complete integration v2") && text.contains(shellQuote(chosen)) {
+    let hook = AppPaths.home.appendingPathComponent(".local/share/offline-complete/shell-integration.zsh")
+    let hookText = (try? String(contentsOf: hook, encoding: .utf8)) ?? ""
+    if text.contains("# offline-complete integration v3") && hookText.contains(shellQuote(chosen)) {
         return nil
     }
     let (code, output) = runTool("oc-manage", [
@@ -1448,8 +1450,10 @@ struct OverviewView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let permission = WindowPermissionStatus.load().accessibility
             let zshrc = AppPaths.home.appendingPathComponent(".zshrc")
-            let auto = (try? String(contentsOf: zshrc, encoding: .utf8))?
-                .contains("# offline-complete integration v2") ?? false
+            let hook = AppPaths.home.appendingPathComponent(".local/share/offline-complete/shell-integration.zsh")
+            let auto = ((try? String(contentsOf: zshrc, encoding: .utf8))?
+                .contains("# offline-complete integration v3") ?? false)
+                && FileManager.default.fileExists(atPath: hook.path)
             let marker = AppPaths.dataDir.appendingPathComponent("app.pid")
             var isRunning = false
             if let value = try? String(contentsOf: marker, encoding: .utf8),

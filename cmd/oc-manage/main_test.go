@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,9 +127,18 @@ func TestShellIntegrationInstallAndUninstall(t *testing.T) {
 	if !strings.Contains(string(data), "# >>> offline-complete integration >>>") {
 		t.Fatalf("missing block: %q", data)
 	}
-	for _, want := range []string{"# offline-complete integration v2", "app.pid", "OFFLINE_COMPLETE_AUTO=1"} {
+	for _, want := range []string{"# offline-complete integration v3", "shell-integration.zsh"} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("missing %q in block: %q", want, data)
+		}
+	}
+	script, err := os.ReadFile(filepath.Join(home, ".local/share/offline-complete/shell-integration.zsh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"app.pid", "OFFLINE_COMPLETE_AUTO=1", "exec '"} {
+		if !strings.Contains(string(script), want) {
+			t.Fatalf("missing %q in script: %q", want, script)
 		}
 	}
 	if !strings.Contains(string(data), original) {
@@ -155,6 +165,9 @@ func TestShellIntegrationInstallAndUninstall(t *testing.T) {
 	}
 	if strings.Contains(string(data), "offline-complete integration") || string(data) != original {
 		t.Fatalf("uninstall left %q, want %q", data, original)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".local/share/offline-complete/shell-integration.zsh")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shell script still exists after uninstall: %v", err)
 	}
 }
 

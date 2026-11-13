@@ -17,7 +17,7 @@ open dist/Offline-Complete.dmg
 # 把 Offline Complete.app 拖到 Applications，然后打开应用
 ```
 
-首次启动会自动安装 `~/.local/bin` 启动器，并在 `~/.zshrc` 顶部写入带标记的自动启动块。之后新开的 zsh 窗口自动进入补全会话。自动启动只在主应用运行时生效。关闭主窗口时应用留在后台，自动补全继续工作；只有真正退出应用（`Cmd+Q` 或菜单“退出 Offline Complete”）后，新终端才不再自动启用，已经运行的自动会话也会隐藏候选窗口。显式执行 `oc` 不受影响。
+首次启动会自动安装 `~/.local/bin` 启动器，并在 `~/.zshrc` 顶部写入一个简短的自动启动引用；实际启动逻辑在 `~/.local/share/offline-complete/shell-integration.zsh`。之后新开的 zsh 窗口自动进入补全会话。自动启动只在主应用运行时生效。关闭主窗口时应用留在后台，自动补全继续工作；只有真正退出应用（`Cmd+Q` 或菜单“退出 Offline Complete”）后，新终端才不再自动启用，已经运行的自动会话也会隐藏候选窗口。显式执行 `oc` 不受影响。
 
 把应用拖到 `~/Applications` 不需要管理员权限；拖到 `/Applications` 由 Finder 决定是否要求管理员权限。
 

@@ -13,7 +13,7 @@ Offline Complete 是一个面向 macOS 的离线终端补全工具。它在 zsh 
 
 1. 打开 DMG。
 2. 把 `Offline Complete.app` 拖到“Applications”。
-3. 打开应用。首次启动会安装命令行启动器，并在 `~/.zshrc` 顶部写入带标记的自动启动块。
+3. 打开应用。首次启动会安装命令行启动器，并在 `~/.zshrc` 顶部写入一个简短的自动启动引用；实际逻辑在独立的 `shell-integration.zsh` 中。
 4. 新开一个 zsh 窗口即可使用；已经打开的终端不会自动接管。
 
 ### 首次启动被 macOS 拦截

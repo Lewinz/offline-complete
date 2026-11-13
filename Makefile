@@ -96,6 +96,7 @@ dist: arm64 node-runtime encrypt
 	cp rules/README.md "$(APP)/Contents/Resources/RULES.md"
 	cp rules/KIRO-SPECS.md "$(APP)/Contents/Resources/RULES-SOURCE.md"
 	cp rules/KIRO-SPECS-LICENSE.MIT "$(APP)/Contents/Resources/licenses/kiro-specs-LICENSE.MIT"
+	cp internal/shellintegration/shell-integration.zsh "$(APP)/Contents/Resources/shell-integration.zsh"
 	cp app/Info.plist "$(APP)/Contents/Info.plist"
 	cp app/AppIcon.icns "$(APP)/Contents/Resources/AppIcon.icns"
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(APP_VERSION)" "$(APP)/Contents/Info.plist"
