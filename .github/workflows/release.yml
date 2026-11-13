@@ -37,10 +37,12 @@ jobs:
         run: make encrypt
 
       - name: Run tests
-        env:
-          # Keep AF_UNIX socket paths below the macOS 104-byte limit.
-          TMPDIR: /tmp
-        run: make test
+        shell: bash
+        run: |
+          # Keep AF_UNIX socket paths short and under a private parent.
+          rm -rf "$HOME/oc-tmp"
+          mkdir -m 700 "$HOME/oc-tmp"
+          TMPDIR="$HOME/oc-tmp" make test
 
       - name: Build signed DMG
         shell: bash

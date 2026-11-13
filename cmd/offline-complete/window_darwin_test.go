@@ -21,14 +21,11 @@ func TestSwiftWindowCheckReceivesOffer(t *testing.T) {
 	if _, err := os.Stat(binary); err != nil {
 		t.Skip("bin/oc-window not built; run make bin")
 	}
-	repoRoot, err := filepath.Abs("../..")
+	root, err := os.MkdirTemp("", "oc-window-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := os.MkdirTemp(repoRoot, ".w-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	base := filepath.Join(root, "b")
 	if err := ipc.EnsurePrivateBase(base); err != nil {

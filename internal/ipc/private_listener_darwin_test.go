@@ -16,15 +16,11 @@ import (
 
 func privateBase(t *testing.T) string {
 	t.Helper()
-	root, err := filepath.Abs("../..")
+	dir, err := os.MkdirTemp("", "oc-ipc-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := os.MkdirTemp(root, ".ipc-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
 }
 
