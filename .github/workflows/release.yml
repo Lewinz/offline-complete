@@ -37,6 +37,9 @@ jobs:
         run: make encrypt
 
       - name: Run tests
+        env:
+          # Keep AF_UNIX socket paths below the macOS 104-byte limit.
+          TMPDIR: /tmp
         run: make test
 
       - name: Build signed DMG
