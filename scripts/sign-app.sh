@@ -10,6 +10,11 @@ set -eu
 APP="${1:?usage: sign-app.sh APP}"
 IDENTITY="${OC_SIGN_IDENTITY:-Offline Complete Dev}"
 KEYCHAIN="${OC_SIGN_KEYCHAIN:-$HOME/Library/Keychains/offline-complete-dev.keychain-db}"
+
+if [ "$IDENTITY" = "-" ] || [ "$IDENTITY" = "adhoc" ]; then
+  codesign --force --deep --sign - "$APP"
+  exit 0
+fi
 SIGN_DIR="${OC_SIGN_DIR:-$HOME/Library/Application Support/offline-complete/signing}"
 PASS_FILE="$SIGN_DIR/keychain-password"
 

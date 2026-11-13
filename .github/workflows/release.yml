@@ -49,6 +49,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_BUILD: ${{ github.run_number }}
+          SIGN_IDENTITY: "-"
         run: |
           set -euo pipefail
           APP_VERSION="${RELEASE_TAG#v}"
