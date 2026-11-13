@@ -18,6 +18,14 @@ fi
 SIGN_DIR="${OC_SIGN_DIR:-$HOME/Library/Application Support/offline-complete/signing}"
 PASS_FILE="$SIGN_DIR/keychain-password"
 
+# CI imports a prebuilt identity into a temporary keychain. Do not run the
+# local certificate-generation path in that case.
+if [ "${OC_SIGN_IMPORTED:-}" = "1" ]; then
+  security unlock-keychain -p "$(cat "$PASS_FILE")" "$KEYCHAIN"
+  codesign --force --deep --keychain "$KEYCHAIN" --sign "$IDENTITY" "$APP"
+  exit 0
+fi
+
 if [ ! -d "$APP" ]; then
   echo "sign-app: missing app bundle: $APP" >&2
   exit 1

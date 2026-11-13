@@ -61,6 +61,7 @@ jobs:
           chmod 0600 "$SIGN_DIR/keychain-password"
           echo "SIGN_IDENTITY=Offline Complete Dev" >> "$GITHUB_ENV"
           echo "SIGN_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "OC_SIGN_IMPORTED=1" >> "$GITHUB_ENV"
 
       - name: Build encrypted rules
         run: make encrypt
