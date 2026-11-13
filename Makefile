@@ -3,7 +3,7 @@
 # in the desktop build environment.
 GO := $(shell command -v go 2>/dev/null)
 ifeq ($(strip $(GO)),)
-GO := $(shell . "$HOME/.g/env" 2>/dev/null; command -v go 2>/dev/null)
+GO := $(shell . "$$HOME/.g/env" 2>/dev/null; command -v go 2>/dev/null)
 endif
 GOFLAGS ?= -mod=vendor
 
