@@ -99,10 +99,11 @@ sleep 5
 `)
 	ready := make(chan struct{}, 1)
 	cache := &Cache{
-		Timeout: time.Second,
-		TTL:     time.Minute,
-		Enabled: true,
-		OnReady: func() { ready <- struct{}{} },
+		Timeout:      500 * time.Millisecond,
+		RetryTimeout: 500 * time.Millisecond,
+		TTL:          time.Minute,
+		Enabled:      true,
+		OnReady:      func() { ready <- struct{}{} },
 	}
 	t.Setenv("COUNT_FILE", counter)
 	if _, ok := cache.Ensure(script, dir); ok {
@@ -117,8 +118,49 @@ sleep 5
 	}
 	time.Sleep(100 * time.Millisecond)
 	data, _ := os.ReadFile(counter)
-	if strings.Count(string(data), "run") != 1 {
-		t.Fatalf("help ran %d times, want 1", strings.Count(string(data), "run"))
+	if strings.Count(string(data), "run") != 2 {
+		t.Fatalf("help ran %d times, want first attempt plus automatic retry", strings.Count(string(data), "run"))
+	}
+}
+
+func TestCacheAutomaticallyRetriesSlowHelp(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "runs")
+	script := writeScript(t, dir, "slowfirst", `#!/bin/sh
+runs="$(cat "$COUNT_FILE" 2>/dev/null || echo 0)"
+runs=$((runs + 1))
+echo "$runs" > "$COUNT_FILE"
+if [ "$runs" -eq 1 ]; then
+  sleep 5
+fi
+cat <<'EOF'
+Commands:
+  alpha  Alpha
+  beta   Beta
+EOF
+`)
+	ready := make(chan struct{}, 1)
+	cache := &Cache{
+		Timeout:      500 * time.Millisecond,
+		RetryTimeout: 2 * time.Second,
+		TTL:          time.Minute,
+		Enabled:      true,
+		OnReady:      func() { ready <- struct{}{} },
+	}
+	t.Setenv("COUNT_FILE", counter)
+	if _, ok := cache.Ensure(script, dir); ok {
+		t.Fatal("slow command should not return a spec immediately")
+	}
+	waitReady(t, ready)
+	spec, ok := cache.Lookup(script, dir)
+	if !ok || spec == nil {
+		t.Fatal("automatic retry did not produce a spec")
+	}
+	if got := childNames(spec.Root); len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
+		t.Fatalf("commands = %v", got)
+	}
+	if data, _ := os.ReadFile(counter); strings.TrimSpace(string(data)) != "2" {
+		t.Fatalf("help did not run twice: %q", data)
 	}
 }
 

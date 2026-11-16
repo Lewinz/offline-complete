@@ -31,9 +31,12 @@ type Cache struct {
 	// Dir stores per-executable JSON results. Empty keeps the cache in memory.
 	Dir     string
 	Timeout time.Duration
-	TTL     time.Duration
-	Enabled bool
-	OnReady func()
+	// RetryTimeout is the second, longer attempt used automatically after a
+	// timeout. Zero derives it from Timeout.
+	RetryTimeout time.Duration
+	TTL          time.Duration
+	Enabled      bool
+	OnReady      func()
 	// Logf is optional and must not receive help output or command arguments.
 	Logf func(format string, args ...any)
 	// LookPath is overridable for tests. It defaults to exec.LookPath.
@@ -153,10 +156,16 @@ func (c *Cache) discover(key, command, cwd string) {
 		c.fail(key, command, err, started)
 		return
 	}
-	output, runErr := c.runHelp(path, cwd, "--help")
+	output, runErr := c.runHelp(path, cwd, c.helpTimeout(), "--help")
 	spec := ParseHelp(command, []byte(output))
+	if specCount(spec) == 0 && errors.Is(runErr, context.DeadlineExceeded) {
+		retryTimeout := c.retryTimeout()
+		c.logf("event=help_retry command=%q timeout_ms=%d", command, retryTimeout.Milliseconds())
+		output, runErr = c.runHelp(path, cwd, retryTimeout, "--help")
+		spec = ParseHelp(command, []byte(output))
+	}
 	if specCount(spec) == 0 && !errors.Is(runErr, context.DeadlineExceeded) {
-		if helpOutput, helpErr := c.runHelp(path, cwd, "help"); len(helpOutput) > 0 {
+		if helpOutput, helpErr := c.runHelp(path, cwd, c.helpTimeout(), "help"); len(helpOutput) > 0 {
 			alternative := ParseHelp(command, []byte(helpOutput))
 			if specCount(alternative) > specCount(spec) {
 				spec, runErr = alternative, helpErr
@@ -232,10 +241,30 @@ func (c *Cache) executable(command string) (string, string, error) {
 	return path, fingerprint, nil
 }
 
-func (c *Cache) runHelp(path, cwd string, args ...string) (string, error) {
-	timeout := c.Timeout
+func (c *Cache) helpTimeout() time.Duration {
+	if c == nil || c.Timeout <= 0 {
+		return defaultTimeout
+	}
+	return c.Timeout
+}
+
+func (c *Cache) retryTimeout() time.Duration {
+	if c != nil && c.RetryTimeout > 0 {
+		return c.RetryTimeout
+	}
+	timeout := c.helpTimeout() * 4
+	if timeout < 3*time.Second {
+		timeout = 3 * time.Second
+	}
+	if timeout > 10*time.Second {
+		timeout = 10 * time.Second
+	}
+	return timeout
+}
+
+func (c *Cache) runHelp(path, cwd string, timeout time.Duration, args ...string) (string, error) {
 	if timeout <= 0 {
-		timeout = defaultTimeout
+		timeout = c.helpTimeout()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
