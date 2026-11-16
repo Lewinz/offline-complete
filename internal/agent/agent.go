@@ -6,6 +6,7 @@ package agent
 import (
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,9 +15,19 @@ import (
 	"offline-complete/internal/editstate"
 	"offline-complete/internal/generator"
 	"offline-complete/internal/history"
+	"offline-complete/internal/introspect"
 	"offline-complete/internal/rules"
 	"offline-complete/internal/shellparse"
 )
+
+// HelpProvider supplies completion specs derived from a command's own help.
+// Ensure may start discovery and return false until the result is cached;
+// Lookup never runs the command.
+type HelpProvider interface {
+	Ensure(command, cwd string) (*introspect.Spec, bool)
+	Lookup(command, cwd string) (*introspect.Spec, bool)
+	Clear(command string)
+}
 
 // Completer resolves a certain command context and returns static candidates.
 type Completer struct {
@@ -25,6 +36,7 @@ type Completer struct {
 	Ranker     Ranker
 	Generators *generator.Runner
 	Specs      *rules.SpecStore
+	Help       HelpProvider
 	History    *history.Store
 	Logger     *diag.Logger
 }
@@ -34,6 +46,9 @@ type Offer struct {
 	Version    uint64
 	Context    shellparse.Context
 	Candidates []rules.Candidate
+	// HelpDerived marks candidates produced by help introspection rather than
+	// the static rule pack or an upstream spec.
+	HelpDerived bool
 }
 
 // Complete returns candidates for a snapshot, or false when the context is
@@ -53,11 +68,23 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 	if !context.Certain {
 		context = c.indexedContext(snapshot)
 	}
+	var helpSpec *introspect.Spec
+	if !context.Certain {
+		context, helpSpec, _ = c.helpContext(snapshot, true)
+	}
 	if !context.Certain {
 		return Offer{}, false
 	}
 	var candidates []rules.Candidate
-	if context.Kind == shellparse.Positional || context.Kind == shellparse.OptionValue {
+	if helpSpec != nil {
+		candidates = helpSpec.Candidates(context)
+		if helpSpec.WantsPaths(context) && c.Generators != nil {
+			source, tokens := c.dynamicInput(snapshot)
+			candidates = append(candidates, c.Generators.CompleteContext(snapshot.CWD, source, context, rules.Arg{
+				Generators: []rules.Generator{{Template: []string{"filepaths"}}},
+			}, tokens)...)
+		}
+	} else if context.Kind == shellparse.Positional || context.Kind == shellparse.OptionValue {
 		arg, hasArg := c.Pack.ArgumentAt(context)
 		if hasArg {
 			for _, suggestion := range arg.Suggestions {
@@ -77,7 +104,7 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 		candidates = c.Pack.CompleteContext(context)
 		if len(candidates) == 0 && c.Generators != nil {
 			source, tokens := c.dynamicInput(snapshot)
-			candidates = c.Generators.CompleteContext(snapshot.CWD, source, context, rules.Arg{}, tokens)
+			candidates = append(candidates, c.Generators.CompleteContext(snapshot.CWD, source, context, rules.Arg{}, tokens)...)
 		}
 	} else {
 		candidates = c.Pack.CompleteContext(context)
@@ -118,7 +145,7 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 			c.Logger.Printf("event=offer_text prefix=%q line=%q", truncate(context.Prefix, 200), truncate(snapshot.Line, 500))
 		}
 	}
-	return Offer{Version: snapshot.Version, Context: context, Candidates: candidates}, true
+	return Offer{Version: snapshot.Version, Context: context, Candidates: candidates, HelpDerived: helpSpec != nil}, true
 }
 
 // indexedContext is the fallback for commands that the static pack omitted.
@@ -149,6 +176,73 @@ func (c *Completer) indexedContext(snapshot editstate.Snapshot) shellparse.Conte
 		},
 	}
 	return shellparse.Resolve(snapshot.Line, snapshot.Cursor, grammar)
+}
+
+// helpContext handles commands that have neither a static rule nor a spec.
+// Once the user starts typing an argument, it may ask the help provider to run
+// the command's own help. Cached results resolve synchronously; a new result
+// triggers a refresh through the provider's OnReady callback.
+func (c *Completer) helpContext(snapshot editstate.Snapshot, ensure bool) (shellparse.Context, *introspect.Spec, bool) {
+	if c == nil || c.Help == nil {
+		return shellparse.Context{}, nil, false
+	}
+	lexed := shellparse.Lex(snapshot.Line, snapshot.Cursor)
+	if !lexed.Certain || len(lexed.Words) == 0 || lexed.Current < 1 {
+		return shellparse.Context{}, nil, false
+	}
+	command := lexed.Words[0]
+	if _, known := c.Grammar[command]; known {
+		return shellparse.Context{}, nil, false
+	}
+	if isWrapperCommand(command) {
+		return shellparse.Context{}, nil, false
+	}
+	if c.Specs != nil {
+		if _, err := c.Specs.LoadName(command); err == nil {
+			return shellparse.Context{}, nil, false
+		}
+	}
+	var spec *introspect.Spec
+	var ok bool
+	if ensure {
+		spec, ok = c.Help.Ensure(command, snapshot.CWD)
+	} else {
+		spec, ok = c.Help.Lookup(command, snapshot.CWD)
+	}
+	if !ok || spec == nil {
+		return shellparse.Context{}, nil, false
+	}
+	grammar := spec.Grammar()
+	if grammar == nil {
+		return shellparse.Context{}, nil, false
+	}
+	context := shellparse.Resolve(snapshot.Line, snapshot.Cursor, grammar)
+	return context, spec, context.Certain
+}
+
+// RefreshHelp forgets a help-derived spec for the current command and starts
+// discovery again. Commands with static rules or upstream specs are left
+// untouched.
+func (c *Completer) RefreshHelp(snapshot editstate.Snapshot) bool {
+	if c == nil || c.Help == nil {
+		return false
+	}
+	lexed := shellparse.Lex(snapshot.Line, snapshot.Cursor)
+	if !lexed.Certain || len(lexed.Words) == 0 || lexed.Current < 1 {
+		return false
+	}
+	command := lexed.Words[0]
+	if _, known := c.Grammar[command]; known || isWrapperCommand(command) {
+		return false
+	}
+	if c.Specs != nil {
+		if _, err := c.Specs.LoadName(command); err == nil {
+			return false
+		}
+	}
+	c.Help.Clear(command)
+	c.Help.Ensure(command, snapshot.CWD)
+	return true
 }
 
 func (c *Completer) dynamicInput(snapshot editstate.Snapshot) ([]byte, []string) {
@@ -184,6 +278,9 @@ func (c *Completer) Context(snapshot editstate.Snapshot) (shellparse.Context, bo
 	if !context.Certain {
 		context = c.indexedContext(snapshot)
 	}
+	if !context.Certain {
+		context, _, _ = c.helpContext(snapshot, false)
+	}
 	return context, context.Certain
 }
 
@@ -193,6 +290,17 @@ func snapshotCommand(snapshot editstate.Snapshot) string {
 		return ""
 	}
 	return lexed.Words[0]
+}
+
+// isWrapperCommand avoids running help for launchers and wrappers whose own
+// help describes the wrapper rather than the command the user is editing.
+func isWrapperCommand(command string) bool {
+	switch filepath.Base(command) {
+	case "sudo", "doas", "env", "xargs", "command", "builtin", "exec", "nohup", "time",
+		"oc", "offline-complete", "oc-window", "oc-app", "oc-client":
+		return true
+	}
+	return false
 }
 
 func hasPrefixFold(name, prefix string) bool {

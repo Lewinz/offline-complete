@@ -13,6 +13,8 @@ import (
 
 	"offline-complete/internal/agent"
 	"offline-complete/internal/editstate"
+	"offline-complete/internal/rules"
+	"offline-complete/internal/shellparse"
 )
 
 type wireMessage struct {
@@ -429,5 +431,48 @@ func TestServiceDismissHidesTheSameVersion(t *testing.T) {
 	service.Refresh()
 	if service.HasOffer() {
 		t.Fatal("dismissed offer became active again")
+	}
+}
+
+func TestServiceRefreshForceRepublishesSameVersion(t *testing.T) {
+	pack := &rules.RulePack{
+		SchemaVersion: 1,
+		Commands:      []rules.Command{{Name: "tool", Args: []rules.Arg{{}}}},
+	}
+	completer := &agent.Completer{
+		Pack:    pack,
+		Grammar: map[string]shellparse.CommandSpec{"tool": {Positional: true}},
+	}
+	state := &editstate.State{}
+	completion, err := agent.NewSession("session-force", state, completer, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	inputReader, inputWriter := io.Pipe()
+	go func() { _ = editstate.ConsumeNULNotify(inputReader, state, service.Refresh) }()
+	go func() { _ = service.Serve() }()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	writeNUL(t, inputWriter, "update", "1", "5", "1", "tool ")
+	if message := readWire(t, reader); message.Type != "clear" || message.Version != 1 {
+		t.Fatalf("initial message = %+v", message)
+	}
+
+	completer.Pack.Commands = []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{{Suggestions: []rules.Candidate{{Name: "alpha"}}}},
+	}}
+	service.RefreshForce()
+	offer := readWire(t, reader)
+	if offer.Type != "offer" || offer.Version != 1 || len(offer.Items) != 1 || offer.Items[0].Name != "alpha" {
+		t.Fatalf("forced offer = %+v", offer)
 	}
 }

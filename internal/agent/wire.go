@@ -24,6 +24,7 @@ type OfferMessage struct {
 	Offer    uint64 `json:"offer"`
 	Selected int    `json:"selected"`
 	Items    []Item `json:"items"`
+	Help     bool   `json:"help,omitempty"`
 }
 
 // SelectionMessage highlights a candidate chosen with the keyboard.
@@ -71,12 +72,17 @@ type dismissCommand struct {
 	Offer   uint64 `json:"offer"`
 }
 
+type refreshCommand struct {
+	Type string `json:"type"`
+}
+
 type commandKind uint8
 
 const (
 	commandFocus commandKind = iota + 1
 	commandSelect
 	commandDismiss
+	commandRefresh
 )
 
 type command struct {
@@ -114,6 +120,12 @@ func parseCommand(data []byte) (command, error) {
 			return command{}, errors.New("invalid dismiss message")
 		}
 		return command{kind: commandDismiss, version: value.Version, offer: value.Offer}, nil
+	case "refresh":
+		var value refreshCommand
+		if err := strictDecode(data, &value); err != nil {
+			return command{}, errors.New("invalid refresh message")
+		}
+		return command{kind: commandRefresh}, nil
 	default:
 		return command{}, errors.New("unknown UI message type")
 	}

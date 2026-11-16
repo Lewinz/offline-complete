@@ -24,6 +24,7 @@ import (
 	"offline-complete/internal/editstate"
 	"offline-complete/internal/generator"
 	"offline-complete/internal/history"
+	"offline-complete/internal/introspect"
 	"offline-complete/internal/ipc"
 	"offline-complete/internal/rules"
 	"offline-complete/internal/session"
@@ -46,11 +47,33 @@ func runAgent(rulesPath string, args []string, stdin io.Reader, stdout io.Writer
 		fmt.Fprintf(os.Stderr, "offline-complete: completion disabled: %v\n", err)
 		return run(args, stdin, stdout)
 	}
+	enableHelpFallback(runtime)
 	wrap := func(writer io.WriteCloser) io.WriteCloser {
 		runtime.base = &lockedWriter{w: writer}
 		return &filterWriter{upstream: runtime.base, navigator: runtime.navigator}
 	}
 	return runWithInputWriter(args, stdin, stdout, wrap, hooks)
+}
+
+// enableHelpFallback installs the help-derived completion fallback for commands
+// outside the shipped rules and spec index. Discovery is asynchronous and only
+// starts after the user has typed past the command name.
+func enableHelpFallback(runtime *agentRuntime) {
+	if runtime == nil || runtime.completer == nil || os.Getenv("OFFLINE_COMPLETE_NO_HELP_FALLBACK") == "1" {
+		return
+	}
+	cache := introspect.NewCache()
+	if dir, err := store.DefaultDir(); err == nil {
+		cache.Dir = filepath.Join(dir, "help")
+	}
+	if runtime.logger != nil {
+		cache.Logf = runtime.logger.Printf
+	}
+	cache.OnReady = runtime.forceRefresh
+	runtime.completer.Help = cache
+	if runtime.logger != nil {
+		runtime.logger.Printf("event=help_fallback enabled dir=%q", cache.Dir)
+	}
 }
 
 type agentRuntime struct {
@@ -64,6 +87,7 @@ type agentRuntime struct {
 	stopOnce          sync.Once
 	accept            chan struct{}
 	refreshCh         chan struct{}
+	forceRefreshCh    chan struct{}
 	mu                sync.Mutex
 	service           *agent.Service
 	completion        *agent.Session
@@ -245,6 +269,7 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 		stop:              make(chan struct{}),
 		accept:            make(chan struct{}),
 		refreshCh:         make(chan struct{}, 1),
+		forceRefreshCh:    make(chan struct{}, 1),
 		generators:        generatorRunner,
 		completer:         completer,
 		logger:            logger,
@@ -525,6 +550,16 @@ func (r *agentRuntime) refresh() {
 	}
 }
 
+// forceRefresh republishes the current line even when its editing version did
+// not change. Help discovery completes out of band, after the refresh that
+// originally found no candidates.
+func (r *agentRuntime) forceRefresh() {
+	select {
+	case r.forceRefreshCh <- struct{}{}:
+	default:
+	}
+}
+
 func (r *agentRuntime) refreshLoop() {
 	for {
 		select {
@@ -536,6 +571,13 @@ func (r *agentRuntime) refreshLoop() {
 			r.mu.Unlock()
 			if service != nil {
 				service.Refresh()
+			}
+		case <-r.forceRefreshCh:
+			r.mu.Lock()
+			service := r.service
+			r.mu.Unlock()
+			if service != nil {
+				service.RefreshForce()
 			}
 		}
 	}

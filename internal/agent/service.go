@@ -83,6 +83,11 @@ func NewService(session *Session, state *editstate.State, conn net.Conn) (*Servi
 // record. A repeated version is ignored.
 func (s *Service) Refresh() { s.refresh(false) }
 
+// RefreshForce recomputes candidates even when the editing version has not
+// changed. Asynchronous help discovery uses it to publish candidates for the
+// line the user is already editing.
+func (s *Service) RefreshForce() { s.refresh(true) }
+
 func (s *Service) refresh(force bool) {
 	version := s.state.Version()
 	snapshot, present := s.state.Snapshot()
@@ -155,7 +160,7 @@ func (s *Service) refresh(force bool) {
 	for i, candidate := range offer.Candidates {
 		items[i] = Item{Name: candidate.Name, Description: candidate.Description, Path: candidate.Path}
 	}
-	s.enqueue(OfferMessage{Type: "offer", Version: version, Offer: offerID, Selected: 0, Items: items})
+	s.enqueue(OfferMessage{Type: "offer", Version: version, Offer: offerID, Selected: 0, Items: items, Help: offer.HelpDerived})
 }
 
 func (s *Service) suppressAfterSelect() {
@@ -290,6 +295,17 @@ func (s *Service) Serve() error {
 			s.enqueue(result)
 		case commandDismiss:
 			// The interface hides its own list; the next edit refreshes it.
+		case commandRefresh:
+			if s.session.RefreshHelp() {
+				version := s.state.Version()
+				s.mu.Lock()
+				s.active = false
+				s.count = 0
+				s.mu.Unlock()
+				s.enqueue(ClearMessage{Type: "clear", Version: version})
+			} else {
+				s.Logger.Printf("event=help_refresh_skipped")
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

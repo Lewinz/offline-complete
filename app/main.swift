@@ -25,6 +25,7 @@ struct WindowMessage: Codable {
     let index: Int?
     let items: [Item]?
     let ok: Bool?
+    let help: Bool?
     let error: String?
 }
 
@@ -331,6 +332,16 @@ final class CandidateView: NSView {
     }
     var onSelect: ((Int) -> Void)?
     var onDismiss: (() -> Void)?
+    var onRefresh: (() -> Void)?
+    var showsRefresh = false {
+        didSet {
+            if !showsRefresh {
+                refreshHovered = false
+            }
+            refreshRect = .zero
+            needsDisplay = true
+        }
+    }
     var selected = 0 {
         didSet {
             updateViewport()
@@ -338,6 +349,8 @@ final class CandidateView: NSView {
         }
     }
     private var hovered = -1
+    private var refreshHovered = false
+    private var refreshRect = NSRect.zero
     private var firstVisibleRow = 0
     private lazy var nameFont = NSFont(name: "Monaco", size: 12.8) ?? NSFont.monospacedSystemFont(ofSize: 12.8, weight: .regular)
     private lazy var selectedFont = NSFont(name: "Monaco-Bold", size: 12.8) ?? NSFont.monospacedSystemFont(ofSize: 12.8, weight: .semibold)
@@ -360,6 +373,7 @@ final class CandidateView: NSView {
     let iconLeading: CGFloat = 10
     let textLeading: CGFloat = 32
     let shortcutWidth: CGFloat = 30
+    let refreshWidth: CGFloat = 30
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { false }
@@ -568,13 +582,38 @@ final class CandidateView: NSView {
             .paragraphStyle: descriptionStyle,
         ]
         if let description = selectedDescription {
+            let trailing = showsRefresh ? refreshWidth + 12 : 6
             let descriptionRect = NSRect(
                 x: horizontalPadding,
                 y: dividerY + 4,
-                width: bounds.width - horizontalPadding * 2 - shortcutWidth - 6,
+                width: bounds.width - horizontalPadding * 2 - shortcutWidth - trailing,
                 height: 16
             )
             (description as NSString).draw(in: descriptionRect, withAttributes: descriptionAttributes)
+        }
+
+        if showsRefresh {
+            let refreshStyle = NSMutableParagraphStyle()
+            refreshStyle.alignment = .center
+            let refreshAttributes: [NSAttributedString.Key: Any] = [
+                .font: shortcutFont,
+                .foregroundColor: colors.shortcut,
+                .paragraphStyle: refreshStyle,
+            ]
+            refreshRect = NSRect(
+                x: bounds.width - horizontalPadding - shortcutWidth - refreshWidth - 6,
+                y: dividerY + 4,
+                width: refreshWidth,
+                height: 16
+            )
+            if refreshHovered {
+                let highlight = NSBezierPath(roundedRect: refreshRect.insetBy(dx: -3, dy: -1), xRadius: 4, yRadius: 4)
+                colors.selectedBackground.withAlphaComponent(0.28).setFill()
+                highlight.fill()
+            }
+            ("刷新" as NSString).draw(in: refreshRect, withAttributes: refreshAttributes)
+        } else {
+            refreshRect = .zero
         }
 
         let shortcutStyle = NSMutableParagraphStyle()
@@ -646,22 +685,29 @@ final class CandidateView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        let index = index(at: point) ?? -1
-        if index != hovered {
+        let overRefresh = showsRefresh && refreshRect.contains(point)
+        let index = overRefresh ? -1 : (index(at: point) ?? -1)
+        if index != hovered || overRefresh != refreshHovered {
             hovered = index
+            refreshHovered = overRefresh
             needsDisplay = true
         }
     }
 
     override func mouseExited(with event: NSEvent) {
-        if hovered != -1 {
+        if hovered != -1 || refreshHovered {
             hovered = -1
+            refreshHovered = false
             needsDisplay = true
         }
     }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if showsRefresh && refreshRect.contains(point) {
+            onRefresh?()
+            return
+        }
         if let index = index(at: point) {
             onSelect?(index)
         } else {
@@ -742,6 +788,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view = CandidateView(frame: NSRect(x: 0, y: 0, width: 320, height: 100))
         view.onSelect = { [weak self] index in self?.select(index) }
         view.onDismiss = { [weak self] in self?.dismiss() }
+        view.onRefresh = { [weak self] in self?.refreshHelp() }
         panel.contentView = view
         view.warmup()
         // Keep the transparent overlay ordered in upfront. Toggling alpha is
@@ -793,6 +840,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             offer = message.offer ?? 0
             items = message.items ?? []
             view.items = items
+            view.showsRefresh = message.help == true
             view.selected = message.selected ?? 0
             show()
         case "selection":
@@ -874,6 +922,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connection?.send(["type": "dismiss", "version": version, "offer": offer])
         }
         hide()
+    }
+
+    private func refreshHelp() {
+        connection?.send(["type": "refresh"])
     }
 
     private func connectionClosed() {

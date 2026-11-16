@@ -114,6 +114,20 @@ func (s *Session) LastOffer() (Offer, bool) {
 	return s.offer, true
 }
 
+// RefreshHelp forgets the help-derived spec for the command on the current
+// line and starts discovery again. It returns false for static commands or
+// when there is no current snapshot.
+func (s *Session) RefreshHelp() bool {
+	if s == nil || s.state == nil || s.completer == nil {
+		return false
+	}
+	snapshot, present := s.state.Snapshot()
+	if !present {
+		return false
+	}
+	return s.completer.RefreshHelp(snapshot)
+}
+
 // Select applies one explicit candidate to the current offer and writes the
 // replacement through the PTY. The offer is consumed even if writing fails;
 // callers must refresh after any error.
