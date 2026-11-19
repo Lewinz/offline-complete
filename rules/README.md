@@ -7,7 +7,9 @@ runtime. Raw spec modules are imported locally and executed by the bundled Node
 generator runtime, with AI calls rewritten to OC commands.
 
 The OrbStack `orb` command is maintained locally in `base.json` because it has
-no upstream spec; re-importing the CDN pack must preserve that addition.
+no upstream spec; re-importing the CDN pack must preserve that addition. The 11
+upstream `-` static suggestions (stdin/stdout and previous-branch shorthands)
+are removed locally; re-importing the CDN pack must drop them again.
 
 - Source: <https://specs.q.us-east-1.amazonaws.com/index.json>
 - Imported: 707 top-level shell commands, about 112,814 static nodes

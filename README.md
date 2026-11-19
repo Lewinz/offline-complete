@@ -5,6 +5,7 @@ Offline Complete 是一个面向 macOS 的离线终端补全工具。它在 zsh 
 - 支持 Apple Silicon Mac，要求 macOS 13+
 - 不需要账号或云服务
 - 静态规则和本地学习都在本机完成
+- 默认会检查 GitHub Releases 的更新，可在「设置 → 更新」关闭
 - 只有主动开启 AI 补全后，才会访问你配置的模型接口
 
 ## 下载与安装
@@ -71,6 +72,8 @@ sudo spctl --master-enable
 - `Esc`：关闭候选
 - 鼠标点击候选插入，点击空白关闭
 
+在候选列表第一项再按 `↑`（或 `Ctrl-P`）会关闭候选并把按键交给 shell，继续向上翻历史。选择一项候选后，如果新位置仍有候选，窗口会就地更新继续提示；没有候选时才关闭。位置参数候选会补一个空格进入下一个参数，目录候选保留 `/` 结尾继续逐级进入。
+
 按键行为可以在「设置 → 补全」中修改：
 
 - Tab：下一项 / 选择当前项
@@ -78,6 +81,23 @@ sudo spctl --master-enable
 - 精确匹配时直接执行
 
 修改补全设置后，建议新开一个终端窗口。
+
+## 自动更新
+
+应用默认在启动后和运行期间检查 [GitHub Releases](https://github.com/Lewinz/offline-complete/releases)：
+
+1. 读取最新 release 的版本号。
+2. 发现新版本时下载 `Offline-Complete.dmg` 和对应的 `.sha256`。
+3. 校验 SHA-256，挂载 DMG，检查应用标识、版本和代码签名，然后解包到本机更新目录。
+4. 在「设置 → 更新」或菜单栏显示「重启并安装」；点击后退出当前应用，替换 `/Applications/Offline Complete.app` 并重新打开。
+
+检查更新会访问 `api.github.com` 和 GitHub 的 release 下载地址，不发送遥测或账号信息。可以在「设置 → 更新」关闭自动检查，也可以在命令行关闭：
+
+```bash
+oc-manage update auto off
+```
+
+已经发布的旧版本还没有更新器，因此第一次升级到带更新器的版本仍需要手动安装；之后的新 tag 就可以自动下载并提示重启安装。
 
 ## 本地学习
 
@@ -126,7 +146,8 @@ oc-manage backup import --file ~/offline-complete-backup.zip
 
 ## 隐私
 
-- 默认不联网，只有开启 AI 补全后才会请求你配置的端点。
+- 默认只访问 GitHub Releases 检查更新；可在「设置 → 更新」或 `oc-manage update auto off` 关闭。
+- 开启 AI 补全后才会请求你配置的模型端点。
 - 本地学习不会保存完整命令行、环境变量或命令输出。
 - 个人纠正会保存用户实际提交的 token；它可能包含路径或参数值，因此只保存在本机。
 - 日志默认不记录输入文本或候选名。

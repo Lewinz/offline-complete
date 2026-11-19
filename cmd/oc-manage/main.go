@@ -48,6 +48,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return autocomplete(args[1:], stdout, stderr)
 	case "menu-bar":
 		return menuBar(args[1:], stdout, stderr)
+	case "update":
+		return updateSettings(args[1:], stdout, stderr)
 	case "shell":
 		return shell(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
@@ -83,6 +85,7 @@ commands:
   autocomplete set --tab next|accept --enter select|execute
          [--exact-match-execute on|off]
   menu-bar on|off|status  show or toggle the background menu bar item
+  update auto on|off|status  show or toggle automatic GitHub update checks
   shell status        show zsh auto-integration state
   shell install       make new interactive zsh windows start through oc
   shell uninstall     remove the marked zsh block
@@ -348,6 +351,35 @@ func menuBar(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "menu bar: %t\n", cfg.MenuBar.Enabled)
+	return 0
+}
+
+func updateSettings(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 || args[0] != "auto" {
+		fmt.Fprintln(stderr, "usage: oc-manage update auto on|off|status")
+		return 2
+	}
+	cfg, err := settings.Load()
+	if err != nil {
+		fmt.Fprintf(stderr, "oc-manage: settings: %v\n", err)
+	}
+	switch args[1] {
+	case "on":
+		cfg.Update.AutoCheck = true
+	case "off":
+		cfg.Update.AutoCheck = false
+	case "status":
+		fmt.Fprintf(stdout, "auto update: %t\n", cfg.Update.AutoCheck)
+		return 0
+	default:
+		fmt.Fprintln(stderr, "usage: oc-manage update auto on|off|status")
+		return 2
+	}
+	if err := settings.Save(cfg); err != nil {
+		fmt.Fprintf(stderr, "oc-manage: save update setting: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "auto update: %t\n", cfg.Update.AutoCheck)
 	return 0
 }
 

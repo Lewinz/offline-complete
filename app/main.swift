@@ -747,7 +747,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var version: UInt64 = 0
     private var offer: UInt64 = 0
     private var items: [Item] = []
-    private var suppressOffersUntil = Date.distantPast
+    private var pendingResultHide: DispatchWorkItem?
+    private var awaitingFollowUp = false
     private var caretLocator: CaretLocator?
     private var terminalPID: pid_t?
     private var focused = true
@@ -826,6 +827,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focused = value
         connection?.send(["type": "focus", "focused": value])
         if !value {
+            awaitingFollowUp = false
+            cancelPendingResultHide()
             hide()
         }
     }
@@ -833,9 +836,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handle(_ message: WindowMessage) {
         switch message.type {
         case "offer":
-            if Date() < suppressOffersUntil {
-                return
-            }
+            awaitingFollowUp = false
+            cancelPendingResultHide()
             version = message.version ?? 0
             offer = message.offer ?? 0
             items = message.items ?? []
@@ -846,15 +848,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "selection":
             view.selected = message.index ?? 0
         case "clear":
-            hide()
+            if awaitingFollowUp {
+                // The shell can publish transient states while it applies the
+                // insertion. Wait for the final offer; hide only if none comes.
+                schedulePendingResultHide()
+            } else {
+                cancelPendingResultHide()
+                hide()
+            }
         case "result":
             if message.ok == true {
-                suppressOffersUntil = Date().addingTimeInterval(0.25)
+                // Keep the list visible while the shell applies the insertion.
+                // The next offer replaces it in place; a clear or this fallback
+                // hides it when the new line has no candidates. A follow-up
+                // offer may also arrive before the result; do not hide it.
+                if version > (message.version ?? 0) {
+                    awaitingFollowUp = false
+                    cancelPendingResultHide()
+                } else {
+                    awaitingFollowUp = true
+                    schedulePendingResultHide()
+                }
+            } else {
+                awaitingFollowUp = false
+                cancelPendingResultHide()
                 hide()
             }
         default:
             break
         }
+    }
+
+    private func schedulePendingResultHide() {
+        pendingResultHide?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingResultHide = nil
+            self?.awaitingFollowUp = false
+            self?.hide()
+        }
+        pendingResultHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    private func cancelPendingResultHide() {
+        pendingResultHide?.cancel()
+        pendingResultHide = nil
     }
 
     private func show() {
@@ -908,19 +946,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func select(_ index: Int) {
         guard offer != 0, index >= 0, index < items.count else { return }
+        awaitingFollowUp = false
+        cancelPendingResultHide()
         connection?.send([
             "type": "select",
             "version": version,
             "offer": offer,
             "index": index,
         ])
-        hide()
     }
 
     private func dismiss() {
         if offer != 0 {
             connection?.send(["type": "dismiss", "version": version, "offer": offer])
         }
+        awaitingFollowUp = false
+        cancelPendingResultHide()
         hide()
     }
 

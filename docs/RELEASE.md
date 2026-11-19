@@ -22,6 +22,16 @@ dist/Offline-Complete.zip
 dist/Offline-Complete.dmg
 ```
 
+自动更新依赖稳定的发布资源名：应用只查找 `Offline-Complete.dmg` 和同名 `.sha256` 校验文件。修改 Release 资源命名时需要同步修改应用。更新包会校验 SHA-256、Bundle ID、版本号和代码签名，并固定当前应用的签名证书指纹；更换签名证书后，旧版本会拒绝自动更新，需要手动安装一次。请尽量使用稳定的签名身份，否则重建后的 TCC 权限可能重新询问，未公证构建也可能触发 Gatekeeper 提示。
+
+可以用开发构建验证完整的下载、校验和 staging 流程（不会覆盖已安装应用）：
+
+```bash
+OFFLINE_COMPLETE_UPDATE_ALLOW_UNINSTALLED=1 \
+  "dist/Offline Complete.app/Contents/MacOS/oc-app" --update-check
+```
+
+
 开发构建使用本地自签名证书 `Offline Complete Dev`，由 `scripts/sign-app.sh` 创建并签名：
 
 ```bash
@@ -61,6 +71,7 @@ scripts/offline-audit.sh
 它在 `sandbox-exec` 的 `(deny network*)` 配置下运行普通代理和管理命令。注意：
 
 - `deny network*` 也可能拒绝 Unix socket，因此完整的 agent 会话需要允许 AF_UNIX、拒绝 IP 的 sandbox profile，或在干净 VM 中用系统级工具观察。
+- 默认自动更新会访问 GitHub；做纯离线审计时设置 `OFFLINE_COMPLETE_NO_UPDATE_CHECK=1`，或在设置中关闭自动更新。
 - 这不是“无网络连接”的完整证明。
 
 正式验收至少覆盖：

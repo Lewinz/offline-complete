@@ -176,6 +176,52 @@ func TestSessionRecordsExplicitSelection(t *testing.T) {
 	}
 }
 
+func TestSessionSeparatesFinishedPositionalValues(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{{Suggestions: []rules.Candidate{{Name: "value"}, {Name: "server/"}}}},
+	}}}
+	completer := &agent.Completer{Pack: pack, Grammar: map[string]shellparse.CommandSpec{"tool": {Positional: true}}}
+	for _, test := range []struct {
+		line string
+		name string
+		want string
+	}{
+		{line: "tool v", name: "value", want: "tool value "},
+		{line: "tool s", name: "server/", want: "tool server/"},
+	} {
+		state := &editstate.State{}
+		if err := state.Update(1, test.line, len(test.line)); err != nil {
+			t.Fatal(err)
+		}
+		var writer bytes.Buffer
+		session, err := agent.NewSession("session-1", state, completer, &writer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offer, offerID, ok := session.Refresh(true)
+		if !ok {
+			t.Fatalf("%q: offer missing", test.line)
+		}
+		index := -1
+		for i, candidate := range offer.Candidates {
+			if candidate.Name == test.name {
+				index = i
+			}
+		}
+		if index < 0 {
+			t.Fatalf("%q: candidate %q missing from %+v", test.line, test.name, offer.Candidates)
+		}
+		if err := session.Select(1, offerID, index); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(writer.String(), test.want) {
+			t.Fatalf("%q: written = %q, want %q", test.line, writer.String(), test.want)
+		}
+		session.Close()
+	}
+}
+
 func TestSessionSelectsInsertValue(t *testing.T) {
 	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
 		Name: "tool",

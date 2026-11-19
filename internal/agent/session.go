@@ -180,6 +180,13 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		s.logf("event=select_rejected reason=apply candidate=%q err=%q", candidate, err)
 		return err
 	}
+	// A completed positional value normally ends the argument. Separate it
+	// from the next word so completion can address the following argument;
+	// directory candidates keep their slash and stay open for drill-down.
+	if s.offer.Context.Kind == shellparse.Positional && needsTrailingSeparator(insert) && len(edited.Line) < 64*1024 {
+		edited.Line = edited.Line[:edited.Cursor] + " " + edited.Line[edited.Cursor:]
+		edited.Cursor++
+	}
 	if err := WriteLineReplacement(s.writer, edited.Line, edited.Cursor); err != nil {
 		s.logf("event=select_rejected reason=write candidate=%q err=%q", candidate, err)
 		return err
@@ -194,6 +201,16 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		s.logf("event=select_applied command=%q subcommands=%q candidate_len=%d", s.offer.Context.Command, strings.Join(s.offer.Context.Subcommands, "/"), len(candidate))
 	}
 	return nil
+}
+
+// needsTrailingSeparator reports whether a completed positional value should
+// be followed by a space to address the next argument. Directory candidates
+// keep their slash so the next offer can list their contents.
+func needsTrailingSeparator(value string) bool {
+	return value != "" &&
+		!strings.HasSuffix(value, "/") &&
+		!strings.HasSuffix(value, " ") &&
+		!strings.HasSuffix(value, "\t")
 }
 
 // LastSelection reports when a candidate was last written into the shell.

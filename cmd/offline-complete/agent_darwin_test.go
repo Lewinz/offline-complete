@@ -288,16 +288,30 @@ func TestAgentKeyboardSelection(t *testing.T) {
 	if _, err := a.stdin.Write([]byte("\r")); err != nil {
 		t.Fatal(err)
 	}
-	var result agentMessage
-	for {
-		message := readAgentMessage(t, a.connection, a.reader, 5*time.Second)
-		if message.Type == "result" {
+	var result, followUp agentMessage
+	haveResult, haveFollowUp := false, false
+	deadline = time.Now().Add(10 * time.Second)
+	for !haveResult || !haveFollowUp {
+		message := readAgentMessage(t, a.connection, a.reader, time.Until(deadline))
+		switch message.Type {
+		case "result":
 			result = message
-			break
+			haveResult = true
+		case "offer":
+			if message.Version > offer.Version {
+				followUp = message
+				haveFollowUp = true
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no result or follow-up offer after selection: result=%+v offer=%+v", result, followUp)
 		}
 	}
 	if !result.OK {
 		t.Fatalf("result = %+v", result)
+	}
+	if len(followUp.Items) == 0 {
+		t.Fatalf("follow-up offer has no items: %+v", followUp)
 	}
 	a.waitState(t, "git checkout", 12)
 
@@ -305,6 +319,121 @@ func TestAgentKeyboardSelection(t *testing.T) {
 	if snapshot, present := a.runtime.state.Snapshot(); !present || snapshot.Line != "git checkout" {
 		t.Fatalf("Enter was forwarded or state cleared: %+v present=%v", snapshot, present)
 	}
+	outcome := a.stop(t)
+	if outcome.err != nil || outcome.code != 0 {
+		t.Fatalf("agent exit: %+v; output %q", outcome, a.output.String())
+	}
+}
+
+func TestAgentUpAtFirstCandidateRecallsHistory(t *testing.T) {
+	const rulesJSON = `{"schemaVersion":1,"commands":[{"name":"git","subcommands":[{"name":"commit","description":"Record changes"},{"name":"checkout","description":"Switch branches"}]}]}`
+	a := startTestAgent(t, rulesJSON)
+
+	run := func(line string) {
+		if _, err := a.stdin.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+		a.waitState(t, line, len(line))
+		if _, err := a.stdin.Write([]byte("\r")); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			snapshot, present := a.runtime.state.Snapshot()
+			if !present || snapshot.Line == "" {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("line %q did not run; state %+v present=%v output %q", line, snapshot, present, a.output.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	run("echo first-xyz")
+	run("echo second-xyz")
+
+	if _, err := a.stdin.Write([]byte("git c")); err != nil {
+		t.Fatal(err)
+	}
+	a.waitState(t, "git c", 5)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		message := readAgentMessage(t, a.connection, a.reader, time.Until(deadline))
+		if message.Type == "offer" && len(message.Items) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no two-candidate offer, last %+v", message)
+		}
+	}
+
+	// Up with the first candidate selected belongs to shell history, not to
+	// the completion list. It must recall the previous command.
+	if _, err := a.stdin.Write([]byte("\x1b[A")); err != nil {
+		t.Fatal(err)
+	}
+	a.waitState(t, "echo second-xyz", 15)
+
+	// The recalled line may have its own offer; Up must still leave it.
+	if _, err := a.stdin.Write([]byte("\x1b[A")); err != nil {
+		t.Fatal(err)
+	}
+	a.waitState(t, "echo first-xyz", 14)
+
+	outcome := a.stop(t)
+	if outcome.err != nil || outcome.code != 0 {
+		t.Fatalf("agent exit: %+v; output %q", outcome, a.output.String())
+	}
+}
+
+func TestAgentPositionalSelectionContinues(t *testing.T) {
+	const rulesJSON = `{"schemaVersion":1,"commands":[{"name":"tool","args":[{"name":"first","suggestions":[{"name":"value"}]},{"name":"second","suggestions":[{"name":"next"}]}]}]}`
+	a := startTestAgent(t, rulesJSON)
+
+	if _, err := a.stdin.Write([]byte("tool v")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := a.waitState(t, "tool v", 6)
+	var offer agentMessage
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		message := readAgentMessage(t, a.connection, a.reader, time.Until(deadline))
+		if message.Type == "offer" && message.Version == snapshot.Version {
+			offer = message
+			break
+		}
+	}
+	if len(offer.Items) != 1 || offer.Items[0].Name != "value" {
+		t.Fatalf("offer = %+v", offer)
+	}
+
+	if _, err := a.stdin.Write([]byte("\r")); err != nil {
+		t.Fatal(err)
+	}
+	var result, followUp agentMessage
+	haveResult, haveFollowUp := false, false
+	deadline = time.Now().Add(10 * time.Second)
+	for !haveResult || !haveFollowUp {
+		message := readAgentMessage(t, a.connection, a.reader, time.Until(deadline))
+		switch message.Type {
+		case "result":
+			result = message
+			haveResult = true
+		case "offer":
+			if message.Version > offer.Version {
+				followUp = message
+				haveFollowUp = true
+			}
+		}
+	}
+	if !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	a.waitState(t, "tool value ", 11)
+	if len(followUp.Items) != 1 || followUp.Items[0].Name != "next" {
+		t.Fatalf("follow-up offer = %+v", followUp)
+	}
+
 	outcome := a.stop(t)
 	if outcome.err != nil || outcome.code != 0 {
 		t.Fatalf("agent exit: %+v; output %q", outcome, a.output.String())

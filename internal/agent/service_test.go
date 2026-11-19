@@ -272,16 +272,151 @@ func TestServiceKeyboardNavigationAcceptsSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.Refresh()
-	if message := readWire(t, reader); message.Type != "clear" {
-		t.Fatalf("insertion redraw re-offered candidates: %+v", message)
+	if message := readWire(t, reader); message.Type != "offer" || len(message.Items) == 0 {
+		t.Fatalf("selection did not offer candidates for the new line: %+v", message)
 	}
-	time.Sleep(250 * time.Millisecond)
 	if err := state.Update(3, "git c", 5); err != nil {
 		t.Fatal(err)
 	}
 	service.Refresh()
 	if message := readWire(t, reader); message.Type != "offer" {
 		t.Fatalf("next edit did not offer candidates: %+v", message)
+	}
+}
+
+func TestServiceOffersNextPositionalAfterSelection(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{
+			{Suggestions: []rules.Candidate{{Name: "value"}}},
+			{Suggestions: []rules.Candidate{{Name: "next"}}},
+		},
+	}}}
+	completer := &agent.Completer{Pack: pack, Grammar: map[string]shellparse.CommandSpec{"tool": {Positional: true}}}
+	state := &editstate.State{}
+	if err := state.Update(1, "tool v", 6); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, completer, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" || len(offer.Items) != 1 || offer.Items[0].Name != "value" {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if !service.Navigate(agent.NavigationAccept) {
+		t.Fatal("selection was not consumed")
+	}
+	if result := readWire(t, reader); result.Type != "result" || !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+
+	// The selected positional value carries a trailing space, so the shell
+	// publishes the next argument slot and completion keeps prompting.
+	if err := state.Update(2, "tool value ", 11); err != nil {
+		t.Fatal(err)
+	}
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" || len(offer.Items) != 1 || offer.Items[0].Name != "next" {
+		t.Fatalf("follow-up offer = %+v", offer)
+	}
+}
+
+func TestServicePreviousAtFirstCandidateReachesShellHistory(t *testing.T) {
+	state := &editstate.State{}
+	if err := state.Update(1, "git c", 5); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, twoCandidateCompleter(), &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" || offer.Selected != 0 {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if service.Navigate(agent.NavigationPrevious) {
+		t.Fatal("previous at the first candidate was consumed instead of reaching history")
+	}
+	if service.HasOffer() {
+		t.Fatal("offer still active after leaving it from the top")
+	}
+	if message := readWire(t, reader); message.Type != "clear" {
+		t.Fatalf("clear = %+v", message)
+	}
+
+	// The forwarded key makes the shell recall a history entry. Its offer
+	// starts at the first candidate again and must not trap the next Up either.
+	if err := state.Update(2, "git checkout", 12); err != nil {
+		t.Fatal(err)
+	}
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" || offer.Selected != 0 {
+		t.Fatalf("offer after history recall = %+v", offer)
+	}
+	if service.Navigate(agent.NavigationPrevious) {
+		t.Fatal("previous after history recall was consumed")
+	}
+}
+
+func TestServicePreviousWalksBackThroughCandidates(t *testing.T) {
+	state := &editstate.State{}
+	if err := state.Update(1, "git c", 5); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, twoCandidateCompleter(), &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if !service.Navigate(agent.NavigationNext) {
+		t.Fatal("next was not consumed")
+	}
+	if selection := readWire(t, reader); selection.Type != "selection" || selection.Index != 1 {
+		t.Fatalf("selection = %+v", selection)
+	}
+	if !service.Navigate(agent.NavigationPrevious) {
+		t.Fatal("previous back to the first candidate was not consumed")
+	}
+	if selection := readWire(t, reader); selection.Type != "selection" || selection.Index != 0 {
+		t.Fatalf("selection = %+v", selection)
+	}
+	if service.Navigate(agent.NavigationPrevious) {
+		t.Fatal("previous below the first candidate was consumed")
 	}
 }
 

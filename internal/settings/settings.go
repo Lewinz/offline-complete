@@ -52,6 +52,12 @@ type MenuBar struct {
 	Enabled bool `json:"enabled"`
 }
 
+// Update controls the optional GitHub release check. The app only contacts
+// the public release API and downloads assets when this is enabled.
+type Update struct {
+	AutoCheck bool `json:"autoCheck"`
+}
+
 // Config is the complete local settings document.
 type Config struct {
 	SchemaVersion int          `json:"schemaVersion"`
@@ -59,6 +65,7 @@ type Config struct {
 	AI            AI           `json:"ai"`
 	Autocomplete  Autocomplete `json:"autocomplete"`
 	MenuBar       MenuBar      `json:"menuBar"`
+	Update        Update       `json:"update"`
 }
 
 type fileConfig struct {
@@ -67,6 +74,11 @@ type fileConfig struct {
 	AI            *fileAI           `json:"ai"`
 	Autocomplete  *fileAutocomplete `json:"autocomplete"`
 	MenuBar       *fileMenuBar      `json:"menuBar"`
+	Update        *fileUpdate       `json:"update"`
+}
+
+type fileUpdate struct {
+	AutoCheck *bool `json:"autoCheck"`
 }
 
 type fileMenuBar struct {
@@ -139,6 +151,7 @@ func Default() (Config, error) {
 			ExactMatchExecute: true,
 		},
 		MenuBar: MenuBar{Enabled: true},
+		Update:  Update{AutoCheck: true},
 	}, nil
 }
 
@@ -221,6 +234,9 @@ func Load() (Config, error) {
 	}
 	if raw.MenuBar != nil && raw.MenuBar.Enabled != nil {
 		cfg.MenuBar.Enabled = *raw.MenuBar.Enabled
+	}
+	if raw.Update != nil && raw.Update.AutoCheck != nil {
+		cfg.Update.AutoCheck = *raw.Update.AutoCheck
 	}
 	if err := cfg.Normalize(); err != nil {
 		return defaults, err

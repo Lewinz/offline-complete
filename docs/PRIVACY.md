@@ -7,12 +7,13 @@
 ├── learning.json        # 选择计数和个人纠正（0600）
 ├── learning.json.bak    # 导入前的自动备份（0600）
 ├── learning-export.json # 默认导出位置（可选，0600）
-├── config.json          # 日志/AI 设置（0600）
+├── config.json          # 日志/AI/更新设置（0600）
 └── logs/
     └── agent-YYYY-MM-DD.log  # 诊断日志（0600，默认保留 3 天）
 
 ~/Library/Application Support/offline-complete/
 ├── learning.json        # 旧版本学习数据；首次打开时迁移到 ~/.oc
+├── updates/             # 已下载并校验的更新包（目录 0700，安装后清理）
 └── run/s-*/socket       # 运行中的会话 socket（目录 0700）
 ```
 
@@ -43,7 +44,19 @@
 - `OFFLINE_COMPLETE_LOG_TEXT=1` 会显式开启输入行、前缀和候选名日志，仅用于本地调试；关闭后不再写入。日志不会上传。
 - 候选窗口只收到候选名称和说明，不收到完整输入。
 - 代理不自动执行正在编辑的命令；只有用户明确选择时才写入替换文本。
-- 应用不发送遥测，不检查更新，不建立网络连接。
+- 应用不发送遥测。
+
+## 更新检查
+
+默认开启的更新检查是应用主动发起的唯一非 AI 网络请求：
+
+- 请求 `https://api.github.com/repos/Lewinz/offline-complete/releases/latest` 获取最新 tag 和资源地址。
+- 发现新版本后，从该 release 的 GitHub 下载地址获取 `Offline-Complete.dmg` 和 `Offline-Complete.dmg.sha256`。
+- 使用临时、无 Cookie、无缓存的 URLSession；不发送账号、学习数据或命令行内容。
+- 下载后校验 SHA-256、Bundle ID、版本号，执行 `codesign --verify --deep --strict`，并固定当前应用的签名证书指纹；任何一项失败都不会进入安装流程。
+- 更新包暂存在 `~/Library/Application Support/offline-complete/updates/`，安装后删除；安装日志也在该目录。
+- 可在「设置 → 更新」关闭自动检查，或执行 `oc-manage update auto off`。关闭后仍可手动点「检查更新」。
+- 更新信任锚点是 GitHub Release 和项目签名证书；在未接入 Apple 公证前，不应对被入侵的 GitHub 账号提供更强保证。
 
 ## 已知边界
 

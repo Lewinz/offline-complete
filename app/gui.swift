@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+import Security
 import SwiftUI
 
 // MARK: - Paths and small helpers
@@ -212,6 +213,16 @@ func loadMenuBarSetting() -> Bool {
         return true
     }
     return menuBar["enabled"] as? Bool ?? true
+}
+
+func loadAutoUpdateSetting() -> Bool {
+    let config = AppPaths.configURL
+    guard let data = try? Data(contentsOf: config),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let update = root["update"] as? [String: Any] else {
+        return true
+    }
+    return update["autoCheck"] as? Bool ?? true
 }
 
 func logDateString(_ date: Date = Date()) -> String {
@@ -1023,8 +1034,519 @@ final class AppShellModel: ObservableObject {
     func refreshAll() { refreshToken &+= 1 }
 }
 
+// MARK: - Updates
+
+struct UpdateAsset {
+    let name: String
+    let url: URL
+}
+
+struct UpdateRelease {
+    let version: String
+    let assets: [UpdateAsset]
+}
+
+enum UpdateFailure: LocalizedError {
+    case message(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .message(let value):
+            return value
+        }
+    }
+}
+
+func normalizedUpdateVersion(_ value: String) -> String {
+    var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if text.hasPrefix("v") || text.hasPrefix("V") {
+        text.removeFirst()
+    }
+    return text
+}
+
+func updateVersionParts(_ value: String) -> [Int] {
+    let normalized = normalizedUpdateVersion(value)
+    let core = normalized.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+    return core.split(separator: ".").map { Int($0) ?? 0 }
+}
+
+func updateVersionIsNewer(_ candidate: String, than current: String) -> Bool {
+    let left = updateVersionParts(candidate)
+    let right = updateVersionParts(current)
+    let count = max(left.count, right.count)
+    for index in 0..<count {
+        let a = index < left.count ? left[index] : 0
+        let b = index < right.count ? right[index] : 0
+        if a != b {
+            return a > b
+        }
+    }
+    return false
+}
+
+func signingCertificateFingerprint(_ app: URL) -> String? {
+    var code: SecStaticCode?
+    guard SecStaticCodeCreateWithPath(app as CFURL, [], &code) == errSecSuccess,
+          let code else { return nil }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+          let dictionary = information as? [String: Any],
+          let certificates = dictionary[kSecCodeInfoCertificates as String] as? [SecCertificate],
+          let certificate = certificates.first else {
+        return nil
+    }
+    let data = SecCertificateCopyData(certificate) as Data
+    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+final class UpdateController: ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case checking
+        case upToDate
+        case downloading
+        case ready(String)
+        case installing
+        case failed(String)
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var autoCheck: Bool = loadAutoUpdateSetting()
+
+    let currentVersion = AppPaths.appVersion
+
+    private let fileManager = FileManager.default
+    private let session: URLSession
+    private var timer: Timer?
+    private var working = false
+    private var stagedApp: URL?
+
+    private static let lastCheckKey = "OfflineCompleteLastUpdateCheck"
+    private static let repository = "Lewinz/offline-complete"
+
+    init() {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 300
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        session = URLSession(configuration: configuration)
+        restoreStagedUpdate()
+    }
+
+    var statusText: String {
+        switch phase {
+        case .idle: return "尚未检查更新"
+        case .checking: return "正在检查更新…"
+        case .upToDate: return "已是最新版本"
+        case .downloading: return "正在下载更新…"
+        case .ready(let version): return "v\(version) 已下载，重启后安装"
+        case .installing: return "正在安装并重启…"
+        case .failed(let message): return message
+        }
+    }
+
+    var isBusy: Bool {
+        switch phase {
+        case .checking, .downloading, .installing: return true
+        default: return false
+        }
+    }
+
+    var readyVersion: String? {
+        if case .ready(let version) = phase {
+            return version
+        }
+        return nil
+    }
+
+    func startAutomaticChecks() {
+        timer?.invalidate()
+        timer = nil
+        if ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_NO_UPDATE_CHECK"] == "1" { return }
+        guard autoCheck else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            self?.check(manual: false)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.check(manual: false)
+        }
+    }
+
+    func setAutoCheck(_ value: Bool) {
+        let (code, output) = runTool("oc-manage", ["update", "auto", value ? "on" : "off"])
+        guard code == 0 else {
+            phase = .failed(output.isEmpty ? "无法保存更新设置" : output)
+            return
+        }
+        autoCheck = value
+        if value {
+            startAutomaticChecks()
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    func reloadAutoCheckSetting() {
+        autoCheck = loadAutoUpdateSetting()
+    }
+
+    func check(manual: Bool) {
+        guard !working else { return }
+        if !manual {
+            if ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_NO_UPDATE_CHECK"] == "1" { return }
+            if case .ready = phase { return }
+            guard autoCheck, installedApplicationPath() != nil else { return }
+            if let last = UserDefaults.standard.object(forKey: Self.lastCheckKey) as? Date,
+               Date().timeIntervalSince(last) < 12 * 60 * 60 {
+                return
+            }
+        }
+        working = true
+        phase = .checking
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.performCheck(manual: manual)
+            } catch {
+                self.publish(.failed(error.localizedDescription), working: false)
+            }
+        }
+    }
+
+    func installAndRestart() {
+        guard case .ready = phase, let staged = stagedApp else { return }
+        guard let path = installedApplicationPath() else {
+            phase = .failed("当前不是安装版，无法自动覆盖")
+            return
+        }
+        let app = URL(fileURLWithPath: path)
+        let parent = app.deletingLastPathComponent()
+        guard fileManager.isWritableFile(atPath: parent.path) else {
+            phase = .failed("没有写入 \(parent.path) 的权限，请手动安装 DMG")
+            return
+        }
+        guard fileManager.fileExists(atPath: staged.path) else {
+            phase = .failed("更新文件已不存在，请重新检查更新")
+            return
+        }
+        do {
+            let script = try writeInstallScript()
+            let logURL = updateBase.appendingPathComponent("install.log")
+            if !fileManager.fileExists(atPath: logURL.path) {
+                fileManager.createFile(atPath: logURL.path, contents: nil)
+            }
+            let handle = try? FileHandle(forWritingTo: logURL)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [
+                script.path,
+                app.path,
+                staged.path,
+                String(ProcessInfo.processInfo.processIdentifier),
+                app.path + ".oc-backup-" + UUID().uuidString,
+            ]
+            process.standardOutput = handle ?? FileHandle.nullDevice
+            process.standardError = handle ?? FileHandle.nullDevice
+            try process.run()
+            phase = .installing
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NSApp.terminate(nil)
+            }
+        } catch {
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    // MARK: Checking
+
+    private var releaseAPI: URL {
+        if let raw = ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_UPDATE_API"],
+           let url = URL(string: raw) {
+            return url
+        }
+        return URL(string: "https://api.github.com/repos/\(Self.repository)/releases/latest")!
+    }
+
+    private func performCheck(manual: Bool) async throws {
+        let release = try await fetchLatestRelease()
+        guard updateVersionIsNewer(release.version, than: currentVersion) else {
+            UserDefaults.standard.set(Date(), forKey: Self.lastCheckKey)
+            publish(.upToDate, working: false)
+            return
+        }
+        let allowUninstalled = ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_UPDATE_ALLOW_UNINSTALLED"] == "1"
+        guard installedApplicationPath() != nil || allowUninstalled else {
+            guard manual else {
+                publish(.idle, working: false)
+                return
+            }
+            throw UpdateFailure.message("发现 v\(release.version)，但当前不是安装版，无法自动更新")
+        }
+        guard let dmgAsset = release.assets.first(where: { $0.name == "Offline-Complete.dmg" }),
+              let checksumAsset = release.assets.first(where: { $0.name == "Offline-Complete.dmg.sha256" }) else {
+            throw UpdateFailure.message("最新版本缺少 DMG 或校验文件")
+        }
+        publish(.downloading, working: true)
+
+        let directory = try updateDirectory(for: release.version)
+        let dmg = directory.appendingPathComponent("Offline-Complete.dmg")
+        try await download(dmgAsset.url, to: dmg)
+        let checksum = try parseChecksum(try await downloadData(checksumAsset.url))
+        let actual = try sha256Hex(of: dmg)
+        guard actual.caseInsensitiveCompare(checksum) == .orderedSame else {
+            throw UpdateFailure.message("下载的 DMG 校验失败")
+        }
+        let staged = try stage(dmg: dmg, version: release.version, directory: directory)
+        try? fileManager.removeItem(at: dmg)
+        UserDefaults.standard.set(Date(), forKey: Self.lastCheckKey)
+        publishReady(staged, version: release.version)
+    }
+
+    private func fetchLatestRelease() async throws -> UpdateRelease {
+        var request = URLRequest(url: releaseAPI)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("OfflineComplete/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        try validate(response)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = root["tag_name"] as? String else {
+            throw UpdateFailure.message("GitHub 返回了无法识别的版本信息")
+        }
+        let rawAssets = root["assets"] as? [[String: Any]] ?? []
+        let assets = rawAssets.compactMap { item -> UpdateAsset? in
+            guard let name = item["name"] as? String,
+                  let raw = item["browser_download_url"] as? String,
+                  let url = URL(string: raw) else { return nil }
+            return UpdateAsset(name: name, url: url)
+        }
+        return UpdateRelease(version: normalizedUpdateVersion(tag), assets: assets)
+    }
+
+    private func validate(_ response: URLResponse) throws {
+        guard let http = response as? HTTPURLResponse else {
+            throw UpdateFailure.message("更新服务器响应无效")
+        }
+        guard http.statusCode == 200 else {
+            if http.statusCode == 404 {
+                throw UpdateFailure.message("GitHub 上还没有可用的 Release")
+            }
+            if http.statusCode == 403 {
+                throw UpdateFailure.message("GitHub 更新检查频率受限，请稍后再试")
+            }
+            throw UpdateFailure.message("更新服务器返回 HTTP \(http.statusCode)")
+        }
+    }
+
+    private func downloadData(_ url: URL) async throws -> Data {
+        let (data, response) = try await session.data(from: url)
+        try validate(response)
+        return data
+    }
+
+    private func download(_ url: URL, to destination: URL) async throws {
+        let (temporary, response) = try await session.download(from: url)
+        try validate(response)
+        try fileManager.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fileManager.removeItem(at: destination)
+        try fileManager.moveItem(at: temporary, to: destination)
+    }
+
+    private func parseChecksum(_ data: Data) throws -> String {
+        let text = String(decoding: data, as: UTF8.self)
+        for token in text.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r" }) {
+            if token.count == 64 && token.allSatisfy({ $0.isHexDigit }) {
+                return String(token)
+            }
+        }
+        throw UpdateFailure.message("校验文件格式无效")
+    }
+
+    private func sha256Hex(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let data = try handle.read(upToCount: 1 << 20) ?? Data()
+            if data.isEmpty { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: Staging and installation
+
+    private var updateBase: URL {
+        AppPaths.dataDir.appendingPathComponent("updates", isDirectory: true)
+    }
+
+    private func updateDirectory(for version: String) throws -> URL {
+        try fileManager.createDirectory(
+            at: updateBase,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let safe = String(version.map { character -> Character in
+            if character.isLetter || character.isNumber || ".+-_".contains(character) {
+                return character
+            }
+            return "_"
+        })
+        let directory = updateBase.appendingPathComponent(safe, isDirectory: true)
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return directory
+    }
+
+    private func stage(dmg: URL, version: String, directory: URL) throws -> URL {
+        let mount = directory.appendingPathComponent("mount", isDirectory: true)
+        try? fileManager.removeItem(at: mount)
+        try fileManager.createDirectory(at: mount, withIntermediateDirectories: true)
+        defer {
+            _ = try? run("/usr/bin/hdiutil", ["detach", "-quiet", mount.path])
+            try? fileManager.removeItem(at: mount)
+        }
+        _ = try run("/usr/bin/hdiutil", [
+            "attach", "-nobrowse", "-readonly", "-mountpoint", mount.path, dmg.path,
+        ])
+        let source = mount.appendingPathComponent("Offline Complete.app")
+        guard fileManager.fileExists(atPath: source.path) else {
+            throw UpdateFailure.message("DMG 中没有 Offline Complete.app")
+        }
+        guard let bundle = Bundle(url: source),
+              bundle.bundleIdentifier == "dev.offlinecomplete.app",
+              let short = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              normalizedUpdateVersion(short) == version else {
+            throw UpdateFailure.message("更新包的版本或标识不匹配")
+        }
+        _ = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", source.path])
+        if let expected = signingCertificateFingerprint(Bundle.main.bundleURL) {
+            guard signingCertificateFingerprint(source) == expected else {
+                throw UpdateFailure.message("更新包签名证书与当前应用不一致")
+            }
+        }
+        let staged = directory.appendingPathComponent("Offline Complete.app")
+        try? fileManager.removeItem(at: staged)
+        _ = try run("/usr/bin/ditto", [source.path, staged.path])
+        _ = try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", staged.path])
+        return staged
+    }
+
+    private func writeInstallScript() throws -> URL {
+        try fileManager.createDirectory(
+            at: updateBase,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let script = updateBase.appendingPathComponent("install.sh")
+        let contents = """
+        #!/bin/sh
+        set -u
+        APP="$1"
+        STAGED="$2"
+        PID="$3"
+        BACKUP="$4"
+        LOG="$(dirname "$0")/install.log"
+        exec >>"$LOG" 2>&1
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] waiting for app $PID"
+        while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+        rm -rf "$BACKUP"
+        if ! mv "$APP" "$BACKUP"; then
+          echo "cannot move current app"
+          open "$APP"
+          exit 1
+        fi
+        if ditto "$STAGED" "$APP"; then
+          rm -rf "$BACKUP"
+          rm -rf "$STAGED"
+          echo "installed"
+        else
+          echo "copy failed; rolling back"
+          rm -rf "$APP"
+          mv "$BACKUP" "$APP"
+        fi
+        sleep 0.5
+        open "$APP"
+        """
+        try contents.write(to: script, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        return script
+    }
+
+    @discardableResult
+    private func run(_ tool: String, _ arguments: [String]) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            throw UpdateFailure.message("无法运行 \(tool)：\(error.localizedDescription)")
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let output = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0 else {
+            throw UpdateFailure.message(output.isEmpty ? "\(tool) 执行失败" : output)
+        }
+        return output
+    }
+
+    private func restoreStagedUpdate() {
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: updateBase,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        for entry in entries {
+            let app = entry.appendingPathComponent("Offline Complete.app")
+            guard let bundle = Bundle(url: app),
+                  bundle.bundleIdentifier == "dev.offlinecomplete.app",
+                  let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                  updateVersionIsNewer(version, than: currentVersion),
+                  (try? run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])) != nil else { continue }
+            if let expected = signingCertificateFingerprint(Bundle.main.bundleURL),
+               signingCertificateFingerprint(app) != expected {
+                continue
+            }
+            stagedApp = app
+            phase = .ready(normalizedUpdateVersion(version))
+            return
+        }
+    }
+
+    private func publish(_ value: Phase, working: Bool) {
+        DispatchQueue.main.async {
+            self.phase = value
+            self.working = working
+        }
+    }
+
+    private func publishReady(_ app: URL, version: String) {
+        DispatchQueue.main.async {
+            self.stagedApp = app
+            self.phase = .ready(version)
+            self.working = false
+        }
+    }
+}
+
 struct AppShellView: View {
     @ObservedObject var model: AppShellModel
+    @ObservedObject var updates: UpdateController
 
     private let items: [(String, String, String)] = [
         ("overview", "开始", "paintbrush.pointed"),
@@ -1113,7 +1635,7 @@ struct AppShellView: View {
             AISettingsView()
                 .opacity(model.selected == "ai" ? 1 : 0)
                 .allowsHitTesting(model.selected == "ai")
-            SettingsView(model: model)
+            SettingsView(model: model, updates: updates)
                 .opacity(model.selected == "settings" ? 1 : 0)
                 .allowsHitTesting(model.selected == "settings")
         }
@@ -1122,6 +1644,7 @@ struct AppShellView: View {
 
 struct SettingsView: View {
     @ObservedObject var model: AppShellModel
+    @ObservedObject var updates: UpdateController
     @State private var tabAction: String
     @State private var enterAction: String
     @State private var exactMatch: Bool
@@ -1132,8 +1655,9 @@ struct SettingsView: View {
     @State private var message: String?
     @State private var isError = false
 
-    init(model: AppShellModel) {
+    init(model: AppShellModel, updates: UpdateController) {
         self.model = model
+        self.updates = updates
         let keys = loadAutocompleteSettings()
         let logs = loadLogSettings()
         _tabAction = State(initialValue: keys.tabAction)
@@ -1151,6 +1675,32 @@ struct SettingsView: View {
                 Text("设置")
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundColor(Color(nsColor: KiroTheme.title))
+
+                settingsCard("更新") {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("当前版本 \(AppPaths.displayVersion)")
+                            Text(updates.statusText)
+                                .font(.system(size: 12))
+                                .foregroundColor(Color(nsColor: KiroTheme.muted))
+                        }
+                        Spacer()
+                        Button("检查更新") { updates.check(manual: true) }
+                            .disabled(updates.isBusy)
+                    }
+                    Toggle("自动检查并下载更新", isOn: Binding(
+                        get: { updates.autoCheck },
+                        set: { updates.setAutoCheck($0) }
+                    ))
+                    if let version = updates.readyVersion {
+                        Button("重启并安装 v\(version)") { updates.installAndRestart() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Color(nsColor: KiroTheme.accent))
+                    }
+                    Text("检查会访问 GitHub Releases；下载后校验 SHA-256 和代码签名，再提示重启安装。")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(nsColor: KiroTheme.muted))
+                }
 
                 settingsCard("补全") {
                     fieldRow("Tab") {
@@ -1369,6 +1919,7 @@ struct SettingsView: View {
         logDirectory = logs.directory.path
         retention = logs.retentionDays
         menuBar = loadMenuBarSetting()
+        updates.reloadAutoCheckSetting()
     }
 }
 
@@ -2135,6 +2686,7 @@ struct LogsView: View {
 
 final class MainWindowController: NSObject, NSWindowDelegate {
     let window: NSWindow
+    let updates = UpdateController()
     private let model = AppShellModel()
     private var host: NSHostingView<AppShellView>!
     var onVisibilityChanged: ((Bool) -> Void)?
@@ -2156,7 +2708,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         window.setFrameAutosaveName("OfflineCompleteMainWindow")
         window.delegate = self
 
-        host = NSHostingView(rootView: AppShellView(model: model))
+        host = NSHostingView(rootView: AppShellView(model: model, updates: updates))
         host.frame = NSRect(origin: .zero, size: contentSize)
         host.autoresizingMask = [.width, .height]
         window.contentView = host
@@ -2186,6 +2738,15 @@ final class MainWindowController: NSObject, NSWindowDelegate {
 
     @objc func refreshAll() {
         model.refreshAll()
+    }
+
+    @objc func checkForUpdates() {
+        updates.check(manual: true)
+        show()
+    }
+
+    @objc func installUpdate() {
+        updates.installAndRestart()
     }
 
     @objc func showLogs() {
@@ -2249,9 +2810,37 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let open = NSMenuItem(title: "打开主界面", action: #selector(openMain), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
+        menu.addItem(.separator())
+
+        switch controller.updates.phase {
+        case .ready(let version):
+            let install = NSMenuItem(title: "重启并安装 v\(version)", action: #selector(installUpdate), keyEquivalent: "")
+            install.target = self
+            menu.addItem(install)
+        case .checking:
+            addMetric("更新", "正在检查…", to: menu)
+        case .downloading:
+            addMetric("更新", "正在下载…", to: menu)
+        case .installing:
+            addMetric("更新", "正在安装…", to: menu)
+        default:
+            break
+        }
+        let check = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        check.target = self
+        menu.addItem(check)
+
         let quit = NSMenuItem(title: "退出 Offline Complete", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+    }
+
+    @objc private func checkForUpdates() {
+        controller.updates.check(manual: true)
+    }
+
+    @objc private func installUpdate() {
+        controller.updates.installAndRestart()
     }
 
     private func addMetric(_ title: String, _ value: String, to menu: NSMenu) {
@@ -2331,6 +2920,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
         syncMenuBar()
+        controller.updates.startAutomaticChecks()
         let controller = self.controller
         DispatchQueue.main.async {
             if let error = ensureCommandLineIntegration() {
@@ -2449,6 +3039,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let logs = NSMenuItem(title: "显示日志", action: #selector(MainWindowController.showLogs), keyEquivalent: "l")
         logs.target = controller
         fileMenu.addItem(logs)
+        let update = NSMenuItem(title: "检查更新…", action: #selector(MainWindowController.checkForUpdates), keyEquivalent: "")
+        update.target = controller
+        fileMenu.addItem(update)
         fileMenu.addItem(.separator())
         let close = NSMenuItem(title: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenu.addItem(close)
@@ -2493,6 +3086,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Check mode
 
+func runUpdateCheck() -> Int32 {
+    let controller = UpdateController()
+    controller.check(manual: true)
+    let deadline = Date().addingTimeInterval(300)
+    while Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        if !controller.isBusy {
+            break
+        }
+    }
+    print("update \(controller.statusText)")
+    fflush(stdout)
+    switch controller.phase {
+    case .ready, .upToDate:
+        return 0
+    default:
+        return 1
+    }
+}
+
 func runCheck() -> Int32 {
     var failed = false
     let rules = loadRules()
@@ -2517,6 +3130,17 @@ func runCheck() -> Int32 {
         FileHandle.standardError.write(Data("oc-app: logging settings: \(error)\n".utf8))
     }
     print("app=\(Bundle.main.bundleURL.path) manage=\(AppPaths.tool("oc-manage")?.path ?? "missing")")
+
+    let versionChecks = [
+        updateVersionIsNewer("v0.2.0", than: "0.1.9"),
+        !updateVersionIsNewer("v1.2.3", than: "1.2.3"),
+        updateVersionIsNewer("1.10.0", than: "1.9.9"),
+    ]
+    if versionChecks.contains(false) {
+        FileHandle.standardError.write(Data("oc-app: update version comparison failed\n".utf8))
+        failed = true
+    }
+    print("update version compare=\(versionChecks.contains(false) ? "failed" : "ok")")
     return failed ? 1 : 0
 }
 
@@ -2524,6 +3148,10 @@ func runCheck() -> Int32 {
 
 if CommandLine.arguments.contains("--check") {
     exit(runCheck())
+}
+
+if CommandLine.arguments.contains("--update-check") {
+    exit(runUpdateCheck())
 }
 
 var screenshotPath: String?

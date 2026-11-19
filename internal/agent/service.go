@@ -49,7 +49,6 @@ type Service struct {
 	count             int
 	active            bool
 	exactMatchExecute bool
-	suppressUntil     time.Time
 	haveContent       bool
 	lastLine          string
 	lastCursor        int
@@ -92,16 +91,6 @@ func (s *Service) refresh(force bool) {
 	version := s.state.Version()
 	snapshot, present := s.state.Snapshot()
 	s.mu.Lock()
-	if time.Now().Before(s.suppressUntil) {
-		s.lastVersion = version
-		s.haveContent = present
-		s.lastLine = snapshot.Line
-		s.lastCursor = snapshot.Cursor
-		s.lastCWD = snapshot.CWD
-		s.mu.Unlock()
-		s.enqueue(ClearMessage{Type: "clear", Version: version})
-		return
-	}
 	if !force && version == s.lastVersion && version != 0 {
 		s.mu.Unlock()
 		return
@@ -163,12 +152,6 @@ func (s *Service) refresh(force bool) {
 	s.enqueue(OfferMessage{Type: "offer", Version: version, Offer: offerID, Selected: 0, Items: items, Help: offer.HelpDerived})
 }
 
-func (s *Service) suppressAfterSelect() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.suppressUntil = time.Now().Add(200 * time.Millisecond)
-}
-
 // HasOffer reports whether a candidate list is currently active.
 func (s *Service) HasOffer() bool {
 	s.mu.Lock()
@@ -199,6 +182,19 @@ func (s *Service) Navigate(action Navigation) bool {
 	}
 	switch action {
 	case NavigationNext, NavigationPrevious:
+		if action == NavigationPrevious && s.selected == 0 {
+			// Up at the first candidate means the user has gone past the top of
+			// the list. Close the offer and let the key reach the shell so it can
+			// recall history instead of being trapped in the completion menu.
+			s.active = false
+			s.count = 0
+			s.dismissedVersion = s.offerVersion
+			version := s.offerVersion
+			s.mu.Unlock()
+			s.dropPending()
+			s.enqueue(ClearMessage{Type: "clear", Version: version})
+			return false
+		}
 		if action == NavigationNext {
 			s.selected = (s.selected + 1) % s.count
 		} else {
@@ -224,7 +220,6 @@ func (s *Service) Navigate(action Navigation) bool {
 			s.count = 0
 			s.mu.Unlock()
 			s.dropPending()
-			s.suppressAfterSelect()
 			s.enqueue(ClearMessage{Type: "clear", Version: current})
 			return false
 		}
@@ -235,8 +230,6 @@ func (s *Service) Navigate(action Navigation) bool {
 		err := s.session.Select(version, offer, index)
 		if err != nil {
 			s.Logger.Printf("event=select_error version=%d offer=%d index=%d err=%q", version, offer, index, err)
-		} else {
-			s.suppressAfterSelect()
 		}
 		result := ResultMessage{Type: "result", Version: version, Offer: offer, OK: err == nil}
 		if err != nil {
@@ -278,16 +271,14 @@ func (s *Service) Serve() error {
 			s.setFocus(parsed.focused)
 		case commandSelect:
 			s.dropPending()
-			err := s.session.Select(parsed.version, parsed.offer, parsed.index)
-			if err != nil {
-				s.Logger.Printf("event=select_error version=%d offer=%d index=%d err=%q", parsed.version, parsed.offer, parsed.index, err)
-			} else {
-				s.suppressAfterSelect()
-			}
 			s.mu.Lock()
 			s.active = false
 			s.count = 0
 			s.mu.Unlock()
+			err := s.session.Select(parsed.version, parsed.offer, parsed.index)
+			if err != nil {
+				s.Logger.Printf("event=select_error version=%d offer=%d index=%d err=%q", parsed.version, parsed.offer, parsed.index, err)
+			}
 			result := ResultMessage{Type: "result", Version: parsed.version, Offer: parsed.offer, OK: err == nil}
 			if err != nil {
 				result.Error = "selection rejected"

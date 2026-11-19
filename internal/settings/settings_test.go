@@ -24,6 +24,9 @@ func TestDefaultsUnderHome(t *testing.T) {
 	if !cfg.MenuBar.Enabled {
 		t.Fatal("menu bar should default to enabled")
 	}
+	if !cfg.Update.AutoCheck {
+		t.Fatal("update checks should default to enabled")
+	}
 	wantDir := filepath.Join(home, ".oc", "logs")
 	if cfg.Logging.Directory != wantDir {
 		t.Fatalf("directory = %q, want %q", cfg.Logging.Directory, wantDir)
@@ -50,6 +53,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	cfg.Logging.RetentionDays = 7
 	cfg.Autocomplete = Autocomplete{TabAction: "accept", EnterAction: "execute", ExactMatchExecute: false}
 	cfg.MenuBar.Enabled = false
+	cfg.Update.AutoCheck = false
 	if err := Save(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +69,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.MenuBar != cfg.MenuBar {
 		t.Fatalf("menu bar = %+v, want %+v", loaded.MenuBar, cfg.MenuBar)
+	}
+	if loaded.Update != cfg.Update {
+		t.Fatalf("update = %+v, want %+v", loaded.Update, cfg.Update)
 	}
 	path, _ := ConfigPath()
 	info, err := os.Stat(path)

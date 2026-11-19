@@ -211,6 +211,31 @@ func TestShellIntegrationFollowsZshrcSymlink(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsCommands(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OFFLINE_COMPLETE_CONFIG", "")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"update", "auto", "off"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update auto off: %d %q", code, stderr.String())
+	}
+	cfg, err := settings.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Update.AutoCheck {
+		t.Fatal("auto update was not disabled")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"update", "auto", "status"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("update auto status: %d %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "auto update: false") {
+		t.Fatalf("status = %q", stdout.String())
+	}
+}
+
 func TestAutocompleteSettingsCommands(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
