@@ -42,6 +42,8 @@ type Session struct {
 	lastSelection time.Time
 	hasSuppress   bool
 	suppressAt    uint64
+	suppressLine  string
+	suppressUntil time.Time
 }
 
 // NewSession binds a shell writer, its editing state and a completer. The
@@ -194,8 +196,11 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		!s.offer.ContinuePositional &&
 		!strings.HasSuffix(insert, "/")
 	s.suppressAt = s.offer.Version
+	s.suppressLine = strings.TrimRight(edited.Line, " \t")
+	s.suppressUntil = time.Now().Add(2 * time.Second)
 	if err := WriteLineReplacement(s.writer, edited.Line, edited.Cursor); err != nil {
 		s.hasSuppress = false
+		s.suppressLine = ""
 		s.logf("event=select_rejected reason=write candidate=%q err=%q", candidate, err)
 		return err
 	}
@@ -229,12 +234,21 @@ func (s *Session) LastSelection() time.Time {
 }
 
 // ConsumeSuppressOffer reports whether the automatic follow-up offer should be
-// skipped for a refresh at version. The request is set by Select for variadic
-// positional values and stays pending until the shell publishes a later state.
-func (s *Session) ConsumeSuppressOffer(version uint64) bool {
+// skipped for a refresh at version and line. The request is set by Select for
+// variadic positional values and only applies once the shell shows the line
+// produced by that selection. Intermediate redraws and stale refreshes leave
+// it pending.
+func (s *Session) ConsumeSuppressOffer(version uint64, line string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.hasSuppress || version <= s.suppressAt {
+	if !s.hasSuppress {
+		return false
+	}
+	if time.Now().After(s.suppressUntil) {
+		s.hasSuppress = false
+		return false
+	}
+	if version <= s.suppressAt || strings.TrimRight(line, " \t") != s.suppressLine {
 		return false
 	}
 	s.hasSuppress = false

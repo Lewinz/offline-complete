@@ -111,13 +111,13 @@ func (s *Service) refresh(force bool) {
 	s.lastCWD = snapshot.CWD
 	s.mu.Unlock()
 
-	suppress := s.session.ConsumeSuppressOffer(version)
 	offer, offerID, ok := s.session.Refresh(focused)
 	if s.state.Version() != version {
 		// The shell moved on while the generator ran. Do not show a stale
 		// offer; the queued refresh will publish the newest snapshot.
 		return
 	}
+	suppress := s.session.ConsumeSuppressOffer(version, snapshot.Line)
 	if !ok {
 		s.mu.Lock()
 		s.active = false

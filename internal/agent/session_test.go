@@ -235,10 +235,11 @@ func TestSessionSuppressesVariadicFollowUpOnlyForValues(t *testing.T) {
 	for _, test := range []struct {
 		line       string
 		name       string
+		edited     string
 		suppressed bool
 	}{
-		{line: "tool v", name: "value", suppressed: true},
-		{line: "tool f", name: "folder/", suppressed: false},
+		{line: "tool v", name: "value", edited: "tool value ", suppressed: true},
+		{line: "tool f", name: "folder/", edited: "tool folder/", suppressed: false},
 	} {
 		state := &editstate.State{}
 		if err := state.Update(1, test.line, len(test.line)); err != nil {
@@ -264,13 +265,13 @@ func TestSessionSuppressesVariadicFollowUpOnlyForValues(t *testing.T) {
 		if err := session.Select(offer.Version, offerID, index); err != nil {
 			t.Fatal(err)
 		}
-		if session.ConsumeSuppressOffer(offer.Version) {
+		if session.ConsumeSuppressOffer(offer.Version, test.edited) {
 			t.Fatalf("%q: stale refresh consumed suppression", test.line)
 		}
-		if got := session.ConsumeSuppressOffer(offer.Version + 1); got != test.suppressed {
+		if got := session.ConsumeSuppressOffer(offer.Version+1, test.edited); got != test.suppressed {
 			t.Fatalf("%q: suppression = %v, want %v", test.line, got, test.suppressed)
 		}
-		if session.ConsumeSuppressOffer(offer.Version + 2) {
+		if session.ConsumeSuppressOffer(offer.Version+2, test.edited) {
 			t.Fatalf("%q: suppression was not consumed", test.line)
 		}
 		session.Close()
