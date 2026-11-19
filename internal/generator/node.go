@@ -47,6 +47,7 @@ type nodeResponse struct {
 	Name       string            `json:"name,omitempty"`
 	Source     string            `json:"source,omitempty"`
 	Candidates []rules.Candidate `json:"candidates,omitempty"`
+	Variadic   bool              `json:"variadic,omitempty"`
 	Error      string            `json:"error,omitempty"`
 }
 
@@ -99,19 +100,32 @@ func (r *NodeRunner) Close() {
 	}
 }
 
+// NodeResult is one generator response. Variadic marks an argument that
+// accepts more values at the same slot.
+type NodeResult struct {
+	Candidates []rules.Candidate
+	Variadic   bool
+}
+
 // Complete runs all generators attached to the selected argument and returns
 // normalized candidates. The caller should treat every failure as non-fatal.
 func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
+	result, err := r.CompleteInfo(request)
+	return result.Candidates, err
+}
+
+// CompleteInfo is Complete with argument-shape metadata.
+func (r *NodeRunner) CompleteInfo(request NodeRequest) (NodeResult, error) {
 	if r == nil {
-		return nil, errors.New("nil node runner")
+		return NodeResult{}, errors.New("nil node runner")
 	}
 	if strings.TrimSpace(request.Source) == "" {
-		return nil, errors.New("empty spec source")
+		return NodeResult{}, errors.New("empty spec source")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.ensureLocked(); err != nil {
-		return nil, err
+		return NodeResult{}, err
 	}
 	r.nextID++
 	requestID := r.nextID
@@ -120,12 +134,12 @@ func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
 		NodeRequest
 	}{ID: requestID, NodeRequest: request})
 	if err != nil {
-		return nil, fmt.Errorf("encode generator request: %w", err)
+		return NodeResult{}, fmt.Errorf("encode generator request: %w", err)
 	}
 	payload = append(payload, '\n')
 	if _, err := r.stdin.Write(payload); err != nil {
 		r.stopLocked()
-		return nil, fmt.Errorf("write generator request: %w", err)
+		return NodeResult{}, fmt.Errorf("write generator request: %w", err)
 	}
 
 	timeout := r.timeout
@@ -139,12 +153,12 @@ func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
 		case value := <-r.lines:
 			if value.err != nil {
 				r.stopLocked()
-				return nil, value.err
+				return NodeResult{}, value.err
 			}
 			var response nodeResponse
 			if err := json.Unmarshal(value.line, &response); err != nil {
 				r.stopLocked()
-				return nil, fmt.Errorf("decode generator response: %w", err)
+				return NodeResult{}, fmt.Errorf("decode generator response: %w", err)
 			}
 			if response.Type == "spec-request" {
 				reply := nodeResponse{Type: "spec-response", RequestID: response.RequestID}
@@ -158,26 +172,26 @@ func (r *NodeRunner) Complete(request NodeRequest) ([]rules.Candidate, error) {
 				encoded, err := json.Marshal(reply)
 				if err != nil {
 					r.stopLocked()
-					return nil, err
+					return NodeResult{}, err
 				}
 				encoded = append(encoded, '\n')
 				if _, err := r.stdin.Write(encoded); err != nil {
 					r.stopLocked()
-					return nil, fmt.Errorf("write spec response: %w", err)
+					return NodeResult{}, fmt.Errorf("write spec response: %w", err)
 				}
 				continue
 			}
 			if response.ID != requestID {
 				r.stopLocked()
-				return nil, errors.New("generator response id mismatch")
+				return NodeResult{}, errors.New("generator response id mismatch")
 			}
 			if response.Error != "" {
-				return nil, errors.New(response.Error)
+				return NodeResult{}, errors.New(response.Error)
 			}
-			return response.Candidates, nil
+			return NodeResult{Candidates: response.Candidates, Variadic: response.Variadic}, nil
 		case <-timer.C:
 			r.stopLocked()
-			return nil, context.DeadlineExceeded
+			return NodeResult{}, context.DeadlineExceeded
 		}
 	}
 }

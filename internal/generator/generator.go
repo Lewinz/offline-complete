@@ -31,10 +31,23 @@ type Runner struct {
 	Specs *rules.SpecStore
 }
 
+// ContextResult is one generated candidate set plus argument-shape metadata.
+type ContextResult struct {
+	Candidates []rules.Candidate
+	// Variadic marks a positional argument that accepts more values at the
+	// same slot. Automatic follow-up completion should not reopen for it.
+	Variadic bool
+}
+
 // CompleteContext runs the generators attached to one argument. It prefers the
 // Node spec runtime and falls back to the Go implementation for simple
 // script/template generators.
 func (r Runner) CompleteContext(cwd string, source []byte, context shellparse.Context, arg rules.Arg, tokens []string) []rules.Candidate {
+	return r.CompleteContextInfo(cwd, source, context, arg, tokens).Candidates
+}
+
+// CompleteContextInfo is CompleteContext with argument-shape metadata.
+func (r Runner) CompleteContextInfo(cwd string, source []byte, context shellparse.Context, arg rules.Arg, tokens []string) ContextResult {
 	if r.Node != nil && len(source) > 0 {
 		request := NodeRequest{
 			Source:         string(source),
@@ -59,14 +72,20 @@ func (r Runner) CompleteContext(cwd string, source []byte, context shellparse.Co
 		default:
 			request.Kind = "positional"
 		}
-		if candidates, err := r.Node.Complete(request); err == nil {
-			return filterCandidates(candidates, context.Prefix, r.candidateLimit(), arg.FilterStrategy == "fuzzy")
+		if info, err := r.Node.CompleteInfo(request); err == nil {
+			return ContextResult{
+				Candidates: filterCandidates(info.Candidates, context.Prefix, r.candidateLimit(), arg.FilterStrategy == "fuzzy"),
+				Variadic:   info.Variadic,
+			}
 		}
 	}
 	if context.Kind == shellparse.Subcommand || context.Kind == shellparse.OptionName {
-		return nil
+		return ContextResult{}
 	}
-	return filterCandidates(r.Complete(cwd, arg.Generators, ""), context.Prefix, r.candidateLimit(), arg.FilterStrategy == "fuzzy")
+	return ContextResult{
+		Candidates: filterCandidates(r.Complete(cwd, arg.Generators, ""), context.Prefix, r.candidateLimit(), arg.FilterStrategy == "fuzzy"),
+		Variadic:   context.Kind == shellparse.Positional && arg.IsVariadic,
+	}
 }
 
 func (r Runner) candidateLimit() int {

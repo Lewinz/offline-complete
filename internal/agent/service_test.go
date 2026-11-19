@@ -333,6 +333,56 @@ func TestServiceOffersNextPositionalAfterSelection(t *testing.T) {
 	}
 }
 
+func TestServiceDoesNotReofferVariadicPositionalValue(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{{
+			Name:        "target",
+			IsVariadic:  true,
+			Suggestions: []rules.Candidate{{Name: "value"}},
+		}},
+	}}}
+	completer := &agent.Completer{Pack: pack, Grammar: map[string]shellparse.CommandSpec{"tool": {Positional: true}}}
+	state := &editstate.State{}
+	if err := state.Update(1, "tool v", 6); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, completer, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" || len(offer.Items) != 1 {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if !service.Navigate(agent.NavigationAccept) {
+		t.Fatal("selection was not consumed")
+	}
+	if result := readWire(t, reader); result.Type != "result" || !result.OK {
+		t.Fatalf("result = %+v", result)
+	}
+	if err := state.Update(2, "tool value ", 11); err != nil {
+		t.Fatal(err)
+	}
+	service.Refresh()
+	if message := readWire(t, reader); message.Type != "clear" {
+		t.Fatalf("variadic follow-up = %+v, want clear", message)
+	}
+	if service.HasOffer() {
+		t.Fatal("variadic follow-up offer stayed active")
+	}
+}
+
 func TestServicePreviousAtFirstCandidateReachesShellHistory(t *testing.T) {
 	state := &editstate.State{}
 	if err := state.Update(1, "git c", 5); err != nil {

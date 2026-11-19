@@ -49,6 +49,13 @@ type Offer struct {
 	// HelpDerived marks candidates produced by help introspection rather than
 	// the static rule pack or an upstream spec.
 	HelpDerived bool
+	// ContinuePositional is false when the resolved positional argument is
+	// variadic. Selecting a non-directory value should not automatically reopen
+	// the same argument's candidate list.
+	ContinuePositional bool
+	// Scope is the git repository root used for learning, or empty outside a
+	// repository.
+	Scope string
 }
 
 // Complete returns candidates for a snapshot, or false when the context is
@@ -75,7 +82,9 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 	if !context.Certain {
 		return Offer{}, false
 	}
+	scope := DirectoryScope(snapshot.CWD)
 	var candidates []rules.Candidate
+	continuePositional := true
 	if helpSpec != nil {
 		candidates = helpSpec.Candidates(context)
 		if helpSpec.WantsPaths(context) && c.Generators != nil {
@@ -87,6 +96,9 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 	} else if context.Kind == shellparse.Positional || context.Kind == shellparse.OptionValue {
 		arg, hasArg := c.Pack.ArgumentAt(context)
 		if hasArg {
+			if context.Kind == shellparse.Positional && arg.IsVariadic {
+				continuePositional = false
+			}
 			for _, suggestion := range arg.Suggestions {
 				if hasPrefixFold(suggestion.Name, context.Prefix) {
 					candidates = append(candidates, suggestion)
@@ -95,7 +107,11 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 		}
 		if c.Generators != nil && (hasArg || context.Kind == shellparse.Positional) {
 			source, tokens := c.dynamicInput(snapshot)
-			candidates = append(candidates, c.Generators.CompleteContext(snapshot.CWD, source, context, arg, tokens)...)
+			result := c.Generators.CompleteContextInfo(snapshot.CWD, source, context, arg, tokens)
+			candidates = append(candidates, result.Candidates...)
+			if context.Kind == shellparse.Positional && result.Variadic {
+				continuePositional = false
+			}
 		}
 	} else if context.Kind == shellparse.Subcommand || context.Kind == shellparse.OptionName {
 		// Static subcommands/options are already in the Go pack. Resolve them
@@ -113,7 +129,7 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 		candidates = append(candidates, c.History.Candidates(context.Prefix, 20)...)
 	}
 	if source, ok := c.Ranker.(PersonalSource); ok {
-		candidates = append(candidates, source.PersonalCandidates(context, 20)...)
+		candidates = append(candidates, source.PersonalCandidates(context, scope, 20)...)
 	}
 	candidates = dedupeCandidates(candidates)
 	candidates = dropTraversalNoise(candidates)
@@ -136,7 +152,7 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 		return Offer{}, false
 	}
 	if c.Ranker != nil {
-		candidates = c.Ranker.Rank(context, candidates)
+		candidates = c.Ranker.Rank(context, scope, candidates)
 	}
 	if c.Logger != nil {
 		c.Logger.Printf("event=offer command=%q subcommands=%q kind=%s candidates=%d prefix_len=%d line_len=%d ms=%.2f",
@@ -145,7 +161,14 @@ func (c *Completer) Complete(snapshot editstate.Snapshot) (Offer, bool) {
 			c.Logger.Printf("event=offer_text prefix=%q line=%q", truncate(context.Prefix, 200), truncate(snapshot.Line, 500))
 		}
 	}
-	return Offer{Version: snapshot.Version, Context: context, Candidates: candidates, HelpDerived: helpSpec != nil}, true
+	return Offer{
+		Version:            snapshot.Version,
+		Context:            context,
+		Candidates:         candidates,
+		HelpDerived:        helpSpec != nil,
+		ContinuePositional: continuePositional,
+		Scope:              scope,
+	}, true
 }
 
 // indexedContext is the fallback for commands that the static pack omitted.

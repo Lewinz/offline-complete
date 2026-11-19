@@ -926,21 +926,30 @@ func isParentToken(_ value: String) -> Bool {
 }
 
 func learningContext(parts: [String]) -> String? {
-    guard parts.count >= 4 else { return nil }
+    var values = parts
+    var scope = ""
+    if values.count >= 2 && values[0] == "repo" {
+        scope = values[1]
+        values = Array(values.dropFirst(2))
+    }
+    guard values.count >= 4 else { return nil }
     let kind: String
-    switch parts[2] {
+    switch values[2] {
     case "opt": kind = "选项"
     case "sub": kind = "子命令"
     case "pos": kind = "位置"
-    default: kind = parts[2]
+    default: kind = values[2]
     }
-    var context = parts[0]
-    if !parts[1].isEmpty {
-        context += " " + parts[1].replacingOccurrences(of: "/", with: " ")
+    var context = values[0]
+    if !values[1].isEmpty {
+        context += " " + values[1].replacingOccurrences(of: "/", with: " ")
     }
     context += " · \(kind)"
-    if parts[2] == "pos" {
-        context += " #\(parts[3])"
+    if values[2] == "pos" {
+        context += " #\(values[3])"
+    }
+    if !scope.isEmpty {
+        context = URL(fileURLWithPath: scope).lastPathComponent + " · " + context
     }
     return context
 }
@@ -974,10 +983,11 @@ func loadLearning() -> LearningSnapshot {
         for (key, raw) in selections {
             guard let selection = raw as? [String: Any] else { continue }
             let parts = key.components(separatedBy: "\0")
-            guard parts.count >= 5, !isParentToken(parts[4]), let context = learningContext(parts: parts) else { continue }
+            let values = parts.count >= 2 && parts[0] == "repo" ? Array(parts.dropFirst(2)) : parts
+            guard values.count >= 5, !isParentToken(values[4]), let context = learningContext(parts: parts) else { continue }
             let count = (selection["count"] as? NSNumber)?.uint64Value ?? 0
             let last = (selection["last"] as? String).flatMap(parseDate)
-            entries.append(LearningEntry(context: context, candidate: parts[4], count: count, last: last))
+            entries.append(LearningEntry(context: context, candidate: values[4], count: count, last: last))
         }
         entries.sort {
             if $0.count != $1.count { return $0.count > $1.count }

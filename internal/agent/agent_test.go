@@ -238,6 +238,33 @@ func TestCompleterRunsGitBranchGeneratorInCWD(t *testing.T) {
 	}
 }
 
+func TestCompleterReportsVariadicPositionalOffers(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{
+			{Name: "first", Suggestions: []rules.Candidate{{Name: "one"}}},
+			{Name: "rest", IsVariadic: true, Suggestions: []rules.Candidate{{Name: "two"}}},
+		},
+	}}}
+	completer := &agent.Completer{Pack: pack, Grammar: pack.Grammar()}
+	for _, test := range []struct {
+		line       string
+		continueOn bool
+	}{
+		{line: "tool o", continueOn: true},
+		{line: "tool one t", continueOn: false},
+		{line: "tool one two t", continueOn: false},
+	} {
+		offer, ok := completer.Complete(editstate.Snapshot{Version: 1, Line: test.line, Cursor: len(test.line)})
+		if !ok {
+			t.Fatalf("%q: no offer", test.line)
+		}
+		if offer.ContinuePositional != test.continueOn {
+			t.Fatalf("%q: ContinuePositional = %v, want %v", test.line, offer.ContinuePositional, test.continueOn)
+		}
+	}
+}
+
 func TestCompleterPreservesInlineOptionPrefix(t *testing.T) {
 	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
 		Name: "tool",
@@ -251,5 +278,50 @@ func TestCompleterPreservesInlineOptionPrefix(t *testing.T) {
 	offer, ok := completer.Complete(editstate.Snapshot{Version: 1, Line: line, Cursor: len(line)})
 	if !ok || len(offer.Candidates) != 1 || offer.Candidates[0].Name != "--output=out.txt" {
 		t.Fatalf("offer = %+v ok=%v", offer, ok)
+	}
+}
+
+func TestCompleterUsesVariadicMetadataFromAutojumpSpec(t *testing.T) {
+	data, err := rules.LoadFile(filepath.Join("..", "..", "rules", "base.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack, err := rules.FromJSON(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := generator.NewNodeRunner()
+	if !runner.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer runner.Close()
+
+	home := t.TempDir()
+	autojump := filepath.Join(home, "Library", "autojump")
+	if err := os.MkdirAll(autojump, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries := "10\t/Users/test/new-api/cmd\n20\t/Users/test/new-api/billamountbackfill\n"
+	if err := os.WriteFile(filepath.Join(autojump, "autojump.txt"), []byte(entries), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner.Env = []string{"HOME=" + home}
+	specs := &rules.SpecStore{Dir: filepath.Join("..", "..", "rules", "specs")}
+	completer := &agent.Completer{
+		Pack:       pack,
+		Grammar:    pack.Grammar(),
+		Specs:      specs,
+		Generators: &generator.Runner{Node: runner, Specs: specs},
+	}
+	line := "j new-api "
+	offer, ok := completer.Complete(editstate.Snapshot{Version: 1, Line: line, Cursor: len(line)})
+	if !ok {
+		t.Fatal("autojump offer missing")
+	}
+	if offer.ContinuePositional {
+		t.Fatal("autojump offer was treated as a fixed positional slot")
+	}
+	if len(offer.Candidates) != 2 {
+		t.Fatalf("candidates = %#v", offer.Candidates)
 	}
 }

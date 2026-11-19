@@ -111,6 +111,7 @@ func (s *Service) refresh(force bool) {
 	s.lastCWD = snapshot.CWD
 	s.mu.Unlock()
 
+	suppress := s.session.ConsumeSuppressOffer(version)
 	offer, offerID, ok := s.session.Refresh(focused)
 	if s.state.Version() != version {
 		// The shell moved on while the generator ran. Do not show a stale
@@ -118,6 +119,16 @@ func (s *Service) refresh(force bool) {
 		return
 	}
 	if !ok {
+		s.mu.Lock()
+		s.active = false
+		s.count = 0
+		s.mu.Unlock()
+		s.enqueue(ClearMessage{Type: "clear", Version: version})
+		return
+	}
+	if suppress {
+		// The selected variadic value completes the argument. Keep the shell
+		// state in sync but do not immediately reopen the same candidate list.
 		s.mu.Lock()
 		s.active = false
 		s.count = 0

@@ -13,9 +13,10 @@ import (
 )
 
 // Recorder receives one explicit selection. Implementations must not block the
-// shell for long and must not persist free text or argument values.
+// shell for long and must not persist free text or argument values. Scope is
+// the git repository root for the selection, or empty outside a repository.
 type Recorder interface {
-	Record(shellparse.Context, string)
+	Record(shellparse.Context, string, string)
 }
 
 // Session coordinates one editing session: it computes an offer for the
@@ -39,6 +40,8 @@ type Session struct {
 	lastVersion   uint64
 	haveVersion   bool
 	lastSelection time.Time
+	hasSuppress   bool
+	suppressAt    uint64
 }
 
 // NewSession binds a shell writer, its editing state and a completer. The
@@ -187,13 +190,18 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		edited.Line = edited.Line[:edited.Cursor] + " " + edited.Line[edited.Cursor:]
 		edited.Cursor++
 	}
+	s.hasSuppress = s.offer.Context.Kind == shellparse.Positional &&
+		!s.offer.ContinuePositional &&
+		!strings.HasSuffix(insert, "/")
+	s.suppressAt = s.offer.Version
 	if err := WriteLineReplacement(s.writer, edited.Line, edited.Cursor); err != nil {
+		s.hasSuppress = false
 		s.logf("event=select_rejected reason=write candidate=%q err=%q", candidate, err)
 		return err
 	}
 	s.lastSelection = time.Now()
 	if s.recorder != nil {
-		s.recorder.Record(s.offer.Context, candidate)
+		s.recorder.Record(s.offer.Context, s.offer.Scope, candidate)
 	}
 	if s.completer.Logger != nil && s.completer.Logger.Text() {
 		s.logf("event=select_applied command=%q subcommands=%q candidate=%q", s.offer.Context.Command, strings.Join(s.offer.Context.Subcommands, "/"), candidate)
@@ -218,6 +226,19 @@ func (s *Session) LastSelection() time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastSelection
+}
+
+// ConsumeSuppressOffer reports whether the automatic follow-up offer should be
+// skipped for a refresh at version. The request is set by Select for variadic
+// positional values and stays pending until the shell publishes a later state.
+func (s *Session) ConsumeSuppressOffer(version uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasSuppress || version <= s.suppressAt {
+		return false
+	}
+	s.hasSuppress = false
+	return true
 }
 
 func (s *Session) logf(format string, args ...any) {

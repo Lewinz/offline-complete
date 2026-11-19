@@ -222,6 +222,61 @@ func TestSessionSeparatesFinishedPositionalValues(t *testing.T) {
 	}
 }
 
+func TestSessionSuppressesVariadicFollowUpOnlyForValues(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{{
+			Name:        "target",
+			IsVariadic:  true,
+			Suggestions: []rules.Candidate{{Name: "value"}, {Name: "folder/"}},
+		}},
+	}}}
+	completer := &agent.Completer{Pack: pack, Grammar: map[string]shellparse.CommandSpec{"tool": {Positional: true}}}
+	for _, test := range []struct {
+		line       string
+		name       string
+		suppressed bool
+	}{
+		{line: "tool v", name: "value", suppressed: true},
+		{line: "tool f", name: "folder/", suppressed: false},
+	} {
+		state := &editstate.State{}
+		if err := state.Update(1, test.line, len(test.line)); err != nil {
+			t.Fatal(err)
+		}
+		session, err := agent.NewSession("session-1", state, completer, &bytes.Buffer{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		offer, offerID, ok := session.Refresh(true)
+		if !ok {
+			t.Fatalf("%q: offer missing", test.line)
+		}
+		index := -1
+		for i, candidate := range offer.Candidates {
+			if candidate.Name == test.name {
+				index = i
+			}
+		}
+		if index < 0 {
+			t.Fatalf("%q: candidate %q missing", test.line, test.name)
+		}
+		if err := session.Select(offer.Version, offerID, index); err != nil {
+			t.Fatal(err)
+		}
+		if session.ConsumeSuppressOffer(offer.Version) {
+			t.Fatalf("%q: stale refresh consumed suppression", test.line)
+		}
+		if got := session.ConsumeSuppressOffer(offer.Version + 1); got != test.suppressed {
+			t.Fatalf("%q: suppression = %v, want %v", test.line, got, test.suppressed)
+		}
+		if session.ConsumeSuppressOffer(offer.Version + 2) {
+			t.Fatalf("%q: suppression was not consumed", test.line)
+		}
+		session.Close()
+	}
+}
+
 func TestSessionSelectsInsertValue(t *testing.T) {
 	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
 		Name: "tool",

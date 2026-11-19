@@ -579,7 +579,7 @@ async function loadModule(source) {
 
 async function complete(request) {
   const module = await loadModule(request.source);
-  if (request.kind === "load") return [];
+  if (request.kind === "load") return { candidates: [] };
   const spec = module.default;
   if (!spec || typeof spec !== "object") throw new Error("spec has no default object");
   const tokens = Array.isArray(request.tokens) ? request.tokens.map(String) : [];
@@ -613,7 +613,7 @@ async function complete(request) {
       result.push(candidate);
       if (result.length >= MAX_CANDIDATES) break;
     }
-    return result;
+    return { candidates: result };
   }
   let arg;
   if (request.kind === "option-value") {
@@ -633,7 +633,7 @@ async function complete(request) {
         result.push(candidate);
         if (result.length >= MAX_CANDIDATES) break;
       }
-      return result;
+      return { candidates: result };
     }
   }
   const generators = generatorList(arg);
@@ -655,7 +655,7 @@ async function complete(request) {
     }
     if (candidates.length >= MAX_CANDIDATES) break;
   }
-  return candidates;
+  return { candidates, variadic: Boolean(arg && arg.isVariadic) };
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -671,8 +671,12 @@ lines.on("line", async (line) => {
       else pending.resolve(request.source ?? "");
       return;
     }
-    const candidates = await complete(request);
-    process.stdout.write(JSON.stringify({ id: request.id, candidates }) + "\n");
+    const result = await complete(request);
+    process.stdout.write(JSON.stringify({
+      id: request.id,
+      candidates: result.candidates,
+      variadic: result.variadic === true,
+    }) + "\n");
   } catch (error) {
     process.stdout.write(JSON.stringify({ id: request?.id ?? 0, error: String(error?.message ?? error) }) + "\n");
   }

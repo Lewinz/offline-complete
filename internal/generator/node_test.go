@@ -356,3 +356,83 @@ func TestNodeRunnerOCAIProtocols(t *testing.T) {
 		}
 	})
 }
+
+func TestNodeRunnerAutojumpArgumentIsVariadic(t *testing.T) {
+	runner := NewNodeRunner()
+	if !runner.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer runner.Close()
+
+	home := t.TempDir()
+	sourceDir := filepath.Join(home, "Library", "autojump")
+	if err := os.MkdirAll(sourceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries := "10\t/Users/test/new-api/cmd\n20\t/Users/test/new-api/billamountbackfill\n"
+	if err := os.WriteFile(filepath.Join(sourceDir, "autojump.txt"), []byte(entries), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner.Env = []string{"HOME=" + home}
+	store := &rules.SpecStore{Dir: filepath.Join("..", "..", "rules", "specs")}
+	source, err := store.LoadName("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := runner.CompleteInfo(NodeRequest{
+		Source:  string(source),
+		Command: "j",
+		Kind:    "positional",
+		Slot:    0,
+		CWD:     t.TempDir(),
+		Tokens:  []string{"j", "new-api", ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Variadic {
+		t.Fatal("autojump argument was not reported as variadic")
+	}
+	if len(info.Candidates) != 2 {
+		t.Fatalf("candidates = %#v", info.Candidates)
+	}
+}
+
+func TestNodeRunnerReportsVariadicArguments(t *testing.T) {
+	runner := NewNodeRunner()
+	if !runner.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer runner.Close()
+
+	for _, test := range []struct {
+		name     string
+		variadic bool
+		field    string
+	}{
+		{name: "single", variadic: false},
+		{name: "many", variadic: true, field: `isVariadic:true,`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := `export default {name:"tool",args:[{name:"target",` + test.field +
+				`generators:[{script:["echo","value"]}]}]}`
+			info, err := runner.CompleteInfo(NodeRequest{
+				Source:  spec,
+				Command: "tool",
+				Kind:    "positional",
+				Slot:    0,
+				CWD:     t.TempDir(),
+				Tokens:  []string{"tool", ""},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Variadic != test.variadic {
+				t.Fatalf("variadic = %v, want %v", info.Variadic, test.variadic)
+			}
+			if len(info.Candidates) != 1 || info.Candidates[0].Name != "value" {
+				t.Fatalf("candidates = %#v", info.Candidates)
+			}
+		})
+	}
+}

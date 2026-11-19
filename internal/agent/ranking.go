@@ -2,6 +2,8 @@ package agent
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -13,22 +15,23 @@ import (
 	"offline-complete/internal/store"
 )
 
-// Ranker reorders matching candidates and records explicit selections. A nil
-// ranker preserves base order and records nothing.
+// Ranker reorders matching candidates and records explicit selections. Scope
+// is the git repository root for the current working directory, or empty
+// outside a repository. A nil ranker preserves base order and records nothing.
 type Ranker interface {
-	Rank(shellparse.Context, []rules.Candidate) []rules.Candidate
-	Record(shellparse.Context, string)
+	Rank(shellparse.Context, string, []rules.Candidate) []rules.Candidate
+	Record(shellparse.Context, string, string)
 }
 
 // PersonalSource contributes candidates learned from manual corrections.
 type PersonalSource interface {
-	PersonalCandidates(shellparse.Context, int) []rules.Candidate
+	PersonalCandidates(shellparse.Context, string, int) []rules.Candidate
 }
 
 // CorrectionRecorder records a manual correction without requiring the
 // correction to have been in the original candidate list.
 type CorrectionRecorder interface {
-	RecordCorrection(shellparse.Context, string, string)
+	RecordCorrection(shellparse.Context, string, string, string)
 }
 
 // StoreRanker applies the local learning store. Selection learning only sees
@@ -42,7 +45,7 @@ type StoreRanker struct {
 
 // Rank keeps base order when learning is disabled, the store is unavailable,
 // or any score is invalid.
-func (r *StoreRanker) Rank(context shellparse.Context, candidates []rules.Candidate) []rules.Candidate {
+func (r *StoreRanker) Rank(context shellparse.Context, scope string, candidates []rules.Candidate) []rules.Candidate {
 	if r == nil || r.Store == nil || !r.Store.Learning() || len(candidates) == 0 {
 		return candidates
 	}
@@ -64,7 +67,7 @@ func (r *StoreRanker) Rank(context shellparse.Context, candidates []rules.Candid
 	}
 	inputs := make([]learning.RankInput, len(normal))
 	for index, candidate := range normal {
-		selection, ok := r.Store.Lookup(contextKey(context, candidate.Name))
+		selection, ok := r.Store.Lookup(contextKey(context, scope, candidate.Name))
 		recency := 0.0
 		count := uint64(0)
 		if ok {
@@ -76,7 +79,7 @@ func (r *StoreRanker) Rank(context shellparse.Context, candidates []rules.Candid
 		confidence := 0.0
 		correctionRecency := 0.0
 		correctionPenalty := 0.0
-		if correction, ok := r.Store.Correction(contextScopeKey(context), candidate.Name); ok {
+		if correction, ok := r.Store.Correction(contextScopeKey(context, scope), candidate.Name); ok {
 			confidence = learning.WilsonLower(correction.Wins, correction.Losses, 1.645)
 			if value, err := learning.Recency(correction.Last, now); err == nil {
 				correctionRecency = value
@@ -109,11 +112,11 @@ func isParentPath(name string) bool {
 
 // Record stores one explicit selection. Failures are ignored so a broken data
 // file cannot block completion.
-func (r *StoreRanker) Record(context shellparse.Context, candidate string) {
+func (r *StoreRanker) Record(context shellparse.Context, scope, candidate string) {
 	if r == nil || r.Store == nil || isParentPath(candidate) {
 		return
 	}
-	if err := r.Store.Record(contextKey(context, candidate), r.now()); err != nil {
+	if err := r.Store.Record(contextKey(context, scope, candidate), r.now()); err != nil {
 		r.Logger.Printf("event=learning_record_error err=%q", err)
 		return
 	}
@@ -126,11 +129,11 @@ func (r *StoreRanker) Record(context shellparse.Context, candidate string) {
 
 // PersonalCandidates exposes values learned from repeated manual corrections.
 // They are merged into the normal candidate list before ranking.
-func (r *StoreRanker) PersonalCandidates(context shellparse.Context, limit int) []rules.Candidate {
+func (r *StoreRanker) PersonalCandidates(context shellparse.Context, scope string, limit int) []rules.Candidate {
 	if r == nil || r.Store == nil || limit <= 0 {
 		return nil
 	}
-	learned := r.Store.PersonalCandidates(contextScopeKey(context), context.Prefix, limit)
+	learned := r.Store.PersonalCandidates(contextScopeKey(context, scope), context.Prefix, limit)
 	result := make([]rules.Candidate, 0, len(learned))
 	for _, candidate := range learned {
 		result = append(result, rules.Candidate{
@@ -143,11 +146,11 @@ func (r *StoreRanker) PersonalCandidates(context shellparse.Context, limit int) 
 
 // RecordCorrection records a value the user submitted instead of the offered
 // candidate. rejected may be empty when no candidate was offered.
-func (r *StoreRanker) RecordCorrection(context shellparse.Context, candidate, rejected string) {
+func (r *StoreRanker) RecordCorrection(context shellparse.Context, scope, candidate, rejected string) {
 	if r == nil || r.Store == nil || isParentPath(candidate) {
 		return
 	}
-	if err := r.Store.RecordCorrection(contextScopeKey(context), candidate, rejected, r.now()); err != nil {
+	if err := r.Store.RecordCorrection(contextScopeKey(context, scope), candidate, rejected, r.now()); err != nil {
 		r.Logger.Printf("event=correction_record_error err=%q", err)
 		return
 	}
@@ -167,7 +170,7 @@ func (r *StoreRanker) now() time.Time {
 	return time.Now()
 }
 
-func contextScopeKey(context shellparse.Context) string {
+func contextScopeKey(context shellparse.Context, scope string) string {
 	kind := "sub"
 	switch context.Kind {
 	case shellparse.OptionName:
@@ -179,14 +182,48 @@ func contextScopeKey(context shellparse.Context) string {
 	if context.Kind == shellparse.Positional {
 		slot = context.Slot
 	}
-	return strings.Join([]string{
+	base := strings.Join([]string{
 		context.Command,
 		strings.Join(context.Subcommands, "/"),
 		kind,
 		strconv.Itoa(slot),
 	}, "\x00")
+	if scope == "" {
+		return base
+	}
+	return "repo\x00" + scope + "\x00" + base
 }
 
-func contextKey(context shellparse.Context, candidate string) string {
-	return contextScopeKey(context) + "\x00" + candidate
+func contextKey(context shellparse.Context, scope, candidate string) string {
+	return contextScopeKey(context, scope) + "\x00" + candidate
+}
+
+// DirectoryScope returns the git repository root containing cwd, or an empty
+// scope outside a repository. Learning and corrections are isolated per root,
+// so branch/value preferences from one repository do not leak into another.
+// It only inspects .git entries and never runs git.
+func DirectoryScope(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	path, err := filepath.Abs(cwd)
+	if err != nil {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	for depth := 0; depth < 64; depth++ {
+		info, err := os.Stat(filepath.Join(path, ".git"))
+		if err == nil && (info.IsDir() || info.Mode().IsRegular()) {
+			return path
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			break
+		}
+		path = parent
+	}
+	return ""
 }

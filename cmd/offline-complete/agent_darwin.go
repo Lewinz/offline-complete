@@ -478,10 +478,10 @@ func (r *agentRuntime) navigate(action agent.Navigation) bool {
 	return handled
 }
 
-// recordSubmit observes the final line before the shell executes it. It only
-// learns a correction when the user typed a concrete argument instead of
-// accepting an offered candidate; ordinary selections are already recorded by
-// Session.Select.
+// recordSubmit observes the final line before the shell executes it. Typing an
+// offered value counts as a selection so user preference can reorder future
+// candidates; otherwise it is recorded as a correction. Repository scope keeps
+// preferences from leaking between working directories.
 func (r *agentRuntime) recordSubmit() {
 	r.mu.Lock()
 	completer := r.completer
@@ -505,12 +505,16 @@ func (r *agentRuntime) recordSubmit() {
 		return
 	}
 	value := context.Prefix
+	scope := agent.DirectoryScope(snapshot.CWD)
 	rejected := ""
-	if offer, ok := completion.LastOffer(); ok && sameLearningScope(offer.Context, context) {
+	if offer, ok := completion.LastOffer(); ok && offer.Scope == scope && sameLearningScope(offer.Context, context) {
 		for _, candidate := range offer.Candidates {
 			if strings.EqualFold(candidate.Name, value) ||
 				strings.EqualFold(strings.TrimSuffix(candidate.Name, "/"), value) ||
 				(candidate.InsertValue != "" && strings.EqualFold(candidate.InsertValue, value)) {
+				if completer.Ranker != nil {
+					completer.Ranker.Record(context, scope, candidate.Name)
+				}
 				return
 			}
 		}
@@ -522,7 +526,7 @@ func (r *agentRuntime) recordSubmit() {
 	if !ok {
 		return
 	}
-	recorder.RecordCorrection(context, value, rejected)
+	recorder.RecordCorrection(context, scope, value, rejected)
 }
 
 func sameLearningScope(left, right shellparse.Context) bool {
