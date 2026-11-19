@@ -91,7 +91,7 @@ sudo spctl --master-enable
 3. 校验 SHA-256，挂载 DMG，检查应用标识、版本和代码签名，然后解包到本机更新目录。
 4. 在「设置 → 更新」或菜单栏显示「重启并安装」；点击后退出当前应用，替换 `/Applications/Offline Complete.app` 并重新打开。
 
-检查更新会访问 `api.github.com` 和 GitHub 的 release 下载地址，不发送遥测或账号信息。可以在「设置 → 更新」关闭自动检查，也可以在命令行关闭：
+检查更新会访问 `github.com` 的 releases/latest 重定向和 release 下载地址，不发送遥测或账号信息。可以在「设置 → 更新」关闭自动检查，也可以在命令行关闭：
 
 ```bash
 oc-manage update auto off

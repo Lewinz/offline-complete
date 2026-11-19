@@ -1130,6 +1130,7 @@ final class UpdateController: ObservableObject {
     private let session: URLSession
     private var timer: Timer?
     private var working = false
+    private var nextCheckAt = Date.distantPast
     private var stagedApp: URL?
 
     private static let lastCheckKey = "OfflineCompleteLastUpdateCheck"
@@ -1206,6 +1207,7 @@ final class UpdateController: ObservableObject {
 
     func check(manual: Bool) {
         guard !working else { return }
+        guard Date() >= nextCheckAt else { return }
         if !manual {
             if ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_NO_UPDATE_CHECK"] == "1" { return }
             if case .ready = phase { return }
@@ -1273,12 +1275,13 @@ final class UpdateController: ObservableObject {
 
     // MARK: Checking
 
-    private var releaseAPI: URL {
-        if let raw = ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_UPDATE_API"],
+    private var latestReleaseURL: URL {
+        if let raw = ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_UPDATE_LATEST"]
+            ?? ProcessInfo.processInfo.environment["OFFLINE_COMPLETE_UPDATE_API"],
            let url = URL(string: raw) {
             return url
         }
-        return URL(string: "https://api.github.com/repos/\(Self.repository)/releases/latest")!
+        return URL(string: "https://github.com/\(Self.repository)/releases/latest")!
     }
 
     private func performCheck(manual: Bool) async throws {
@@ -1317,35 +1320,58 @@ final class UpdateController: ObservableObject {
     }
 
     private func fetchLatestRelease() async throws -> UpdateRelease {
-        var request = URLRequest(url: releaseAPI)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        var request = URLRequest(url: latestReleaseURL)
+        request.httpMethod = "HEAD"
         request.setValue("OfflineComplete/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
+        let (_, response) = try await session.data(for: request)
         try validate(response)
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = root["tag_name"] as? String else {
-            throw UpdateFailure.message("GitHub 返回了无法识别的版本信息")
+        guard let finalURL = response.url,
+              let tag = releaseTag(from: finalURL) else {
+            throw UpdateFailure.message("GitHub 上还没有可用的 Release")
         }
-        let rawAssets = root["assets"] as? [[String: Any]] ?? []
-        let assets = rawAssets.compactMap { item -> UpdateAsset? in
-            guard let name = item["name"] as? String,
-                  let raw = item["browser_download_url"] as? String,
-                  let url = URL(string: raw) else { return nil }
-            return UpdateAsset(name: name, url: url)
+        let version = normalizedUpdateVersion(tag)
+        let prefix = "https://github.com/\(Self.repository)/releases/download/\(tag)/"
+        guard let dmg = URL(string: prefix + "Offline-Complete.dmg"),
+              let checksum = URL(string: prefix + "Offline-Complete.dmg.sha256") else {
+            throw UpdateFailure.message("无法构造更新下载地址")
         }
-        return UpdateRelease(version: normalizedUpdateVersion(tag), assets: assets)
+        return UpdateRelease(version: version, assets: [
+            UpdateAsset(name: "Offline-Complete.dmg", url: dmg),
+            UpdateAsset(name: "Offline-Complete.dmg.sha256", url: checksum),
+        ])
+    }
+
+    private func releaseTag(from url: URL) -> String? {
+        let parts = url.pathComponents
+        guard let index = parts.firstIndex(of: "tag"), index + 1 < parts.count else {
+            return nil
+        }
+        let tag = parts[index + 1]
+        return tag.isEmpty ? nil : tag
     }
 
     private func validate(_ response: URLResponse) throws {
         guard let http = response as? HTTPURLResponse else {
             throw UpdateFailure.message("更新服务器响应无效")
         }
-        guard http.statusCode == 200 else {
+        guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 404 {
                 throw UpdateFailure.message("GitHub 上还没有可用的 Release")
             }
-            if http.statusCode == 403 {
-                throw UpdateFailure.message("GitHub 更新检查频率受限，请稍后再试")
+            if http.statusCode == 403 || http.statusCode == 429 {
+                if let raw = http.value(forHTTPHeaderField: "Retry-After"),
+                   let seconds = Int(raw), seconds > 0 {
+                    throw UpdateFailure.message("GitHub 暂时限制更新检查，请 \(seconds) 秒后重试")
+                }
+                if let raw = http.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+                   let epoch = Double(raw) {
+                    let reset = Date(timeIntervalSince1970: epoch)
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale(identifier: "en_US_POSIX")
+                    formatter.dateFormat = "HH:mm"
+                    throw UpdateFailure.message("GitHub 更新检查额度已用完，预计 \(formatter.string(from: reset)) 恢复")
+                }
+                throw UpdateFailure.message("GitHub 暂时拒绝更新检查，请稍后重试")
             }
             throw UpdateFailure.message("更新服务器返回 HTTP \(http.statusCode)")
         }
@@ -1542,6 +1568,11 @@ final class UpdateController: ObservableObject {
         DispatchQueue.main.async {
             self.phase = value
             self.working = working
+            if case .failed = value {
+                self.nextCheckAt = Date().addingTimeInterval(15)
+            } else {
+                self.nextCheckAt = .distantPast
+            }
         }
     }
 

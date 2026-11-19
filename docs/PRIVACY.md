@@ -50,7 +50,7 @@
 
 默认开启的更新检查是应用主动发起的唯一非 AI 网络请求：
 
-- 请求 `https://api.github.com/repos/Lewinz/offline-complete/releases/latest` 获取最新 tag 和资源地址。
+- 请求 `https://github.com/Lewinz/offline-complete/releases/latest`（302 重定向到最新 tag），再按该 tag 构造并下载固定名称的 release 资源；不使用 `api.github.com`，避免未认证 API 的每小时额度。
 - 发现新版本后，从该 release 的 GitHub 下载地址获取 `Offline-Complete.dmg` 和 `Offline-Complete.dmg.sha256`。
 - 使用临时、无 Cookie、无缓存的 URLSession；不发送账号、学习数据或命令行内容。
 - 下载后校验 SHA-256、Bundle ID、版本号，执行 `codesign --verify --deep --strict`，并固定当前应用的签名证书指纹；任何一项失败都不会进入安装流程。
