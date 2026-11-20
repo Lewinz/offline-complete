@@ -13,8 +13,11 @@ func writeError(_ message: String) {
 
 struct Item: Codable {
     let name: String
+    let label: String?
     let description: String?
     let path: String?
+
+    var displayName: String { label ?? name }
 }
 
 struct WindowMessage: Codable {
@@ -453,7 +456,7 @@ final class CandidateView: NSView {
     func preferredSize(count: Int) -> NSSize {
         let rows = min(max(count, 1), maximumRows)
         let visible = items.prefix(maximumRows)
-        let nameWidth = visible.map { textWidth($0.name, font: nameFont) }.max() ?? 0
+        let nameWidth = visible.map { textWidth($0.displayName, font: nameFont) }.max() ?? 0
         let descriptionWidth = visible
             .compactMap { $0.description }
             .map { textWidth($0, font: descriptionFont) }
@@ -559,7 +562,7 @@ final class CandidateView: NSView {
                 width: row.maxX - textLeading - horizontalPadding,
                 height: 15
             )
-            (items[index].name as NSString).draw(in: nameRect, withAttributes: nameAttributes)
+            (items[index].displayName as NSString).draw(in: nameRect, withAttributes: nameAttributes)
         }
 
         let dividerY = verticalPadding + CGFloat(visible) * rowHeight

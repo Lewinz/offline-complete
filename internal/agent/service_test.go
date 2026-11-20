@@ -721,3 +721,45 @@ func TestServicePublishesAfterStaleRefreshOfSameLine(t *testing.T) {
 		t.Fatalf("message = %+v, want clear for version 3", message)
 	}
 }
+
+func TestServiceStripsTypedDirectoryFromLabels(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{{
+			Suggestions: []rules.Candidate{{Name: "cmd/billing/"}, {Name: "cmd/sdk/"}},
+		}},
+	}}}
+	completer := &agent.Completer{
+		Pack:    pack,
+		Grammar: map[string]shellparse.CommandSpec{"tool": {Positional: true}},
+	}
+	state := &editstate.State{}
+	if err := state.Update(1, "tool cmd/", 9); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, completer, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	offer := readWire(t, reader)
+	if offer.Type != "offer" || len(offer.Items) != 2 {
+		t.Fatalf("offer = %+v", offer)
+	}
+	if offer.Items[0].Name != "cmd/billing/" || offer.Items[0].Label != "billing" {
+		t.Fatalf("first item = %+v", offer.Items[0])
+	}
+	if offer.Items[1].Name != "cmd/sdk/" || offer.Items[1].Label != "sdk" {
+		t.Fatalf("second item = %+v", offer.Items[1])
+	}
+}

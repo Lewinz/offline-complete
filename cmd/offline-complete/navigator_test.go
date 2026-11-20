@@ -169,3 +169,117 @@ type nopWriteCloser struct {
 }
 
 func (w nopWriteCloser) Close() error { return nil }
+
+func newTestFilterWriter(nav *navigator) (*filterWriter, *bytes.Buffer) {
+	var upstream bytes.Buffer
+	return &filterWriter{upstream: nopWriteCloser{Buffer: &upstream}, navigator: nav}, &upstream
+}
+
+func TestFilterWriterUnwrapsSingleLineBracketedPaste(t *testing.T) {
+	actions := 0
+	nav := &navigator{
+		can: func() bool { return true },
+		on: func(agent.Navigation) bool {
+			actions++
+			return true
+		},
+	}
+	writer, upstream := newTestFilterWriter(nav)
+	input := []byte(pasteStart + "billamountbackfill" + pasteEnd)
+	written, err := writer.Write(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written != len(input) {
+		t.Fatalf("written = %d, want %d", written, len(input))
+	}
+	if upstream.String() != "billamountbackfill" {
+		t.Fatalf("upstream = %q", upstream.String())
+	}
+	if actions != 0 {
+		t.Fatalf("actions = %d", actions)
+	}
+}
+
+func TestFilterWriterReassemblesSplitBracketedPaste(t *testing.T) {
+	nav := &navigator{
+		can: func() bool { return true },
+		on:  func(agent.Navigation) bool { return true },
+	}
+	writer, upstream := newTestFilterWriter(nav)
+	input := []byte(pasteStart + "billamountbackfill" + pasteEnd)
+	for _, split := range []int{2, 4, 6, 12, len(input) - 3} {
+		if _, err := writer.Write(input[:split]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(input[split:]); err != nil {
+			t.Fatal(err)
+		}
+		if upstream.String() != "billamountbackfill" {
+			t.Fatalf("split %d: upstream = %q", split, upstream.String())
+		}
+		upstream.Reset()
+	}
+}
+
+func TestFilterWriterKeepsUnsafePastesFramed(t *testing.T) {
+	for _, payload := range []string{"one\ntwo", "one\r", "one\x03two", "one\ttwo", "one\x1btwo"} {
+		nav := &navigator{
+			can: func() bool { return true },
+			on:  func(agent.Navigation) bool { return true },
+		}
+		writer, upstream := newTestFilterWriter(nav)
+		input := []byte(pasteStart + payload + pasteEnd)
+		if _, err := writer.Write(input); err != nil {
+			t.Fatal(err)
+		}
+		if upstream.String() != string(input) {
+			t.Fatalf("payload %q: upstream = %q", payload, upstream.String())
+		}
+	}
+}
+
+func TestFilterWriterHidesOfferForMultilinePaste(t *testing.T) {
+	var actions []agent.Navigation
+	nav := &navigator{
+		can: func() bool { return true },
+		on: func(action agent.Navigation) bool {
+			actions = append(actions, action)
+			return true
+		},
+	}
+	writer, upstream := newTestFilterWriter(nav)
+	input := []byte(pasteStart + "one\ntwo" + pasteEnd)
+	if _, err := writer.Write(input); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.String() != string(input) {
+		t.Fatalf("upstream = %q, want framed paste", upstream.String())
+	}
+	if len(actions) != 1 || actions[0] != agent.NavigationDismiss {
+		t.Fatalf("actions = %v, want one dismiss", actions)
+	}
+}
+
+func TestFilterWriterKeepsLoneEscapeForDismissal(t *testing.T) {
+	dismissed := false
+	nav := &navigator{
+		can: func() bool { return true },
+		on: func(action agent.Navigation) bool {
+			if action == agent.NavigationDismiss {
+				dismissed = true
+			}
+			return true
+		},
+	}
+	writer, upstream := newTestFilterWriter(nav)
+	if _, err := writer.Write([]byte("\x1b")); err != nil {
+		t.Fatal(err)
+	}
+	if !dismissed {
+		t.Fatal("lone escape was buffered instead of dismissing")
+	}
+	if upstream.Len() != 0 {
+		t.Fatalf("upstream = %q", upstream.String())
+	}
+}

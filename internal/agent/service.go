@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"offline-complete/internal/diag"
 	"offline-complete/internal/editstate"
+	"offline-complete/internal/shellparse"
 )
 
 const uiWriteTimeout = 2 * time.Second
@@ -169,9 +171,32 @@ func (s *Service) refresh(force bool) {
 
 	items := make([]Item, len(offer.Candidates))
 	for i, candidate := range offer.Candidates {
-		items[i] = Item{Name: candidate.Name, Description: candidate.Description, Path: candidate.Path}
+		items[i] = Item{
+			Name:        candidate.Name,
+			Label:       displayLabel(offer.Context, candidate.Name),
+			Description: candidate.Description,
+			Path:        candidate.Path,
+		}
 	}
 	s.enqueue(OfferMessage{Type: "offer", Version: version, Offer: offerID, Selected: 0, Items: items, Help: offer.HelpDerived})
+}
+
+// displayLabel hides the directory already typed in the command line. The full
+// name stays in Name so insertion still replaces the whole token. Directory
+// candidates keep their folder icon, so the display omits the trailing slash.
+func displayLabel(context shellparse.Context, name string) string {
+	label := name
+	typed := context.InlinePrefix + context.Prefix
+	if index := strings.LastIndexByte(typed, '/'); index >= 0 {
+		dir := typed[:index+1]
+		if len(name) > len(dir) && strings.EqualFold(name[:len(dir)], dir) {
+			label = name[len(dir):]
+		}
+	}
+	if len(label) > 1 {
+		label = strings.TrimSuffix(label, "/")
+	}
+	return label
 }
 
 // invalidateRefresh forgets the last applied line so a refresh that raced with

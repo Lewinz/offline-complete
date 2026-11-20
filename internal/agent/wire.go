@@ -11,8 +11,10 @@ import (
 const MaxMessage = 64 * 1024
 
 // Item is one candidate sent to the interface. It contains no editing buffer.
+// Label is the name to draw; Name remains the full token used for insertion.
 type Item struct {
 	Name        string `json:"name"`
+	Label       string `json:"label,omitempty"`
 	Description string `json:"description,omitempty"`
 	Path        string `json:"path,omitempty"`
 }
