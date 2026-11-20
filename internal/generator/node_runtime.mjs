@@ -641,13 +641,26 @@ async function complete(request) {
   const seen = new Set();
   for (const generator of generators) {
     const query = queryTerm(generator, token, context);
-    const queryPrefix = query && token.endsWith(query) ? token.slice(0, token.length - query.length) : "";
+    // Custom generators such as filepaths return names relative to the
+    // directory being completed. Reattach the typed directory so candidates
+    // stay valid tokens; a trailing slash has an empty query but still needs
+    // the "dir/" prefix.
+    const queryPrefix = query && token.endsWith(query)
+      ? token.slice(0, token.length - query.length)
+      : query === ""
+        ? token.slice(0, token.lastIndexOf("/") + 1)
+        : "";
     for (const candidate of await runOne(generator, token, query, context)) {
       if (!candidate.name || seen.has(candidate.name)) continue;
       if (!matches(candidate.name, query, request.filterStrategy === "fuzzy")) continue;
       if (queryPrefix && !candidate.name.toLowerCase().startsWith(queryPrefix.toLowerCase())) {
         candidate.name = queryPrefix + candidate.name;
         if (candidate.insertValue) candidate.insertValue = queryPrefix + candidate.insertValue;
+        if (candidate.path) {
+          candidate.path = path.isAbsolute(candidate.name)
+            ? candidate.name.replace(/\/+$/, "")
+            : path.resolve(context.currentWorkingDirectory, candidate.name);
+        }
       }
       seen.add(candidate.name);
       candidates.push(candidate);

@@ -41,13 +41,16 @@ type ClearMessage struct {
 	Version uint64 `json:"version"`
 }
 
-// ResultMessage acknowledges a selection.
+// ResultMessage acknowledges a selection. FollowUp is set to false when the
+// agent already knows the inserted value ends the completion context; the
+// interface can then hide without waiting for a refresh.
 type ResultMessage struct {
-	Type    string `json:"type"`
-	Version uint64 `json:"version,omitempty"`
-	Offer   uint64 `json:"offer,omitempty"`
-	OK      bool   `json:"ok"`
-	Error   string `json:"error,omitempty"`
+	Type     string `json:"type"`
+	Version  uint64 `json:"version,omitempty"`
+	Offer    uint64 `json:"offer,omitempty"`
+	OK       bool   `json:"ok"`
+	FollowUp *bool  `json:"followUp,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 type commandHeader struct {

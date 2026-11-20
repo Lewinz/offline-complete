@@ -81,7 +81,10 @@ func (s *Store) Candidates(prefix string, limit int) []rules.Candidate {
 	foldedPrefix := strings.ToLower(prefix)
 	for index := len(s.Entries) - 1; index >= 0; index-- {
 		for _, token := range strings.Fields(s.Entries[index]) {
-			if traversalOnly(token) || !strings.HasPrefix(strings.ToLower(token), foldedPrefix) || seen[token] {
+			// Repeating the token already on the command line cannot complete
+			// anything and only crowds out real children of a directory.
+			if traversalOnly(token) || strings.EqualFold(token, prefix) ||
+				!strings.HasPrefix(strings.ToLower(token), foldedPrefix) || seen[token] {
 				continue
 			}
 			seen[token] = true

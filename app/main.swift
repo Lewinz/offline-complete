@@ -25,6 +25,7 @@ struct WindowMessage: Codable {
     let index: Int?
     let items: [Item]?
     let ok: Bool?
+    let followUp: Bool?
     let help: Bool?
     let error: String?
 }
@@ -865,6 +866,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if version > (message.version ?? 0) {
                     awaitingFollowUp = false
                     cancelPendingResultHide()
+                } else if message.followUp == false {
+                    // The agent already knows the inserted value ends the
+                    // completion context. Hide now instead of waiting out the
+                    // follow-up timer.
+                    awaitingFollowUp = false
+                    cancelPendingResultHide()
+                    hide()
                 } else {
                     awaitingFollowUp = true
                     schedulePendingResultHide()

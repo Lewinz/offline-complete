@@ -9,6 +9,7 @@ import (
 	"offline-complete/internal/agent"
 	"offline-complete/internal/editstate"
 	"offline-complete/internal/generator"
+	"offline-complete/internal/history"
 	"offline-complete/internal/rules"
 )
 
@@ -97,6 +98,59 @@ func TestCompleterCompletesAutojumpAliasJ(t *testing.T) {
 	candidate := offer.Candidates[0]
 	if candidate.Name != "alpha" || candidate.Description != "/Users/example/projects/alpha" {
 		t.Fatalf("candidate = %#v", candidate)
+	}
+}
+
+func TestCompleterCompletesNestedDirectory(t *testing.T) {
+	node := generator.NewNodeRunner()
+	if !node.Available() {
+		t.Skip("node is unavailable")
+	}
+	defer node.Close()
+	data, err := rules.LoadFile(filepath.Join("..", "..", "rules", "base.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack, err := rules.FromJSON(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := &rules.SpecStore{Dir: filepath.Join("..", "..", "rules", "specs.enc")}
+	completer := &agent.Completer{
+		Pack:       pack,
+		Grammar:    pack.Grammar(),
+		Specs:      specs,
+		Generators: &generator.Runner{Node: node},
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "nested", "one"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "nested", "two"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(dir, ".zsh_history")
+	if err := os.WriteFile(historyPath, []byte("cd nested/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completer.History = history.Load(historyPath)
+
+	line := "cd nested/"
+	offer, ok := completer.Complete(editstate.Snapshot{Version: 1, Line: line, Cursor: len(line), CWD: dir})
+	if !ok {
+		t.Fatal("nested directory offer missing")
+	}
+	found := map[string]bool{}
+	for _, candidate := range offer.Candidates {
+		found[candidate.Name] = true
+	}
+	for _, want := range []string{"nested/one/", "nested/two/"} {
+		if !found[want] {
+			t.Fatalf("candidates = %+v, missing %q", offer.Candidates, want)
+		}
+	}
+	if found["nested/"] {
+		t.Fatalf("candidates = %+v, still contains the typed directory", offer.Candidates)
 	}
 }
 

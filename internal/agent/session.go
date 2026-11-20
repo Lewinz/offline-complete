@@ -134,8 +134,10 @@ func (s *Session) RefreshHelp() bool {
 }
 
 // Select applies one explicit candidate to the current offer and writes the
-// replacement through the PTY. The offer is consumed even if writing fails;
-// callers must refresh after any error.
+// replacement through the PTY. It reports whether the resulting line can still
+// have a follow-up offer. A completed variadic value ends the argument, so the
+// interface can hide immediately without waiting for a refresh. The offer is
+// consumed even if writing fails; callers must refresh after any error.
 // SetRecorder installs a local selection recorder. It must be called before
 // selections are accepted.
 func (s *Session) SetRecorder(recorder Recorder) {
@@ -163,17 +165,17 @@ func (s *Session) ExactMatch(index int) bool {
 	return strings.HasSuffix(name, "/") && strings.EqualFold(strings.TrimSuffix(name, "/"), prefix)
 }
 
-func (s *Session) Select(version, offer uint64, index int) error {
+func (s *Session) Select(version, offer uint64, index int) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.hasOffer || s.offer.Version != version || s.offerID != offer {
 		s.logf("event=select_rejected reason=stale version=%d offer=%d index=%d", version, offer, index)
-		return errors.New("stale candidate offer")
+		return false, errors.New("stale candidate offer")
 	}
 	candidate, ok := s.guard.Select(s.session, version, offer, index)
 	if !ok {
 		s.logf("event=select_rejected reason=guard version=%d offer=%d index=%d", version, offer, index)
-		return errors.New("candidate selection rejected")
+		return false, errors.New("candidate selection rejected")
 	}
 	s.hasOffer = false
 	insert := candidate
@@ -183,7 +185,7 @@ func (s *Session) Select(version, offer uint64, index int) error {
 	edited, err := Apply(s.snapshot, insert)
 	if err != nil {
 		s.logf("event=select_rejected reason=apply candidate=%q err=%q", candidate, err)
-		return err
+		return false, err
 	}
 	// A completed positional value normally ends the argument. Separate it
 	// from the next word so completion can address the following argument;
@@ -202,7 +204,7 @@ func (s *Session) Select(version, offer uint64, index int) error {
 		s.hasSuppress = false
 		s.suppressLine = ""
 		s.logf("event=select_rejected reason=write candidate=%q err=%q", candidate, err)
-		return err
+		return false, err
 	}
 	s.lastSelection = time.Now()
 	if s.recorder != nil {
@@ -213,7 +215,7 @@ func (s *Session) Select(version, offer uint64, index int) error {
 	} else {
 		s.logf("event=select_applied command=%q subcommands=%q candidate_len=%d", s.offer.Context.Command, strings.Join(s.offer.Context.Subcommands, "/"), len(candidate))
 	}
-	return nil
+	return !s.hasSuppress, nil
 }
 
 // needsTrailingSeparator reports whether a completed positional value should

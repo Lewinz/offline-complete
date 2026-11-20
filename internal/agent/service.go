@@ -111,14 +111,18 @@ func (s *Service) refresh(force bool) {
 	s.lastCWD = snapshot.CWD
 	s.mu.Unlock()
 
-	offer, offerID, ok := s.session.Refresh(focused)
+	// A completed variadic value cannot produce another candidate list. Do not
+	// run the generator just to discover nothing; hide the interface now.
 	if s.state.Version() != version {
-		// The shell moved on while the generator ran. Do not show a stale
-		// offer; the queued refresh will publish the newest snapshot.
+		// The shell moved on before this refresh; do not consume the
+		// suppression for a state the user has already left. The next refresh
+		// must not be mistaken for an unchanged redraw, so drop the cached
+		// line that would otherwise silence it.
+		s.invalidateRefresh()
 		return
 	}
 	suppress := s.session.ConsumeSuppressOffer(version, snapshot.Line)
-	if !ok {
+	if suppress {
 		s.mu.Lock()
 		s.active = false
 		s.count = 0
@@ -126,9 +130,16 @@ func (s *Service) refresh(force bool) {
 		s.enqueue(ClearMessage{Type: "clear", Version: version})
 		return
 	}
-	if suppress {
-		// The selected variadic value completes the argument. Keep the shell
-		// state in sync but do not immediately reopen the same candidate list.
+
+	offer, offerID, ok := s.session.Refresh(focused)
+	if s.state.Version() != version {
+		// The shell moved on while the generator ran. Do not show a stale
+		// offer; the queued refresh will publish the newest snapshot. Forget
+		// the cached line so that follow-up refresh is not deduplicated.
+		s.invalidateRefresh()
+		return
+	}
+	if !ok {
 		s.mu.Lock()
 		s.active = false
 		s.count = 0
@@ -161,6 +172,15 @@ func (s *Service) refresh(force bool) {
 		items[i] = Item{Name: candidate.Name, Description: candidate.Description, Path: candidate.Path}
 	}
 	s.enqueue(OfferMessage{Type: "offer", Version: version, Offer: offerID, Selected: 0, Items: items, Help: offer.HelpDerived})
+}
+
+// invalidateRefresh forgets the last applied line so a refresh that raced with
+// a newer editing state cannot make the follow-up refresh look like an
+// unchanged redraw.
+func (s *Service) invalidateRefresh() {
+	s.mu.Lock()
+	s.haveContent = false
+	s.mu.Unlock()
 }
 
 // HasOffer reports whether a candidate list is currently active.
@@ -238,15 +258,11 @@ func (s *Service) Navigate(action Navigation) bool {
 		s.count = 0
 		s.mu.Unlock()
 		s.dropPending()
-		err := s.session.Select(version, offer, index)
+		followUp, err := s.session.Select(version, offer, index)
 		if err != nil {
 			s.Logger.Printf("event=select_error version=%d offer=%d index=%d err=%q", version, offer, index, err)
 		}
-		result := ResultMessage{Type: "result", Version: version, Offer: offer, OK: err == nil}
-		if err != nil {
-			result.Error = "selection rejected"
-		}
-		s.enqueue(result)
+		s.enqueue(selectionResult(version, offer, followUp, err))
 		return true
 	case NavigationDismiss:
 		s.active = false
@@ -261,6 +277,19 @@ func (s *Service) Navigate(action Navigation) bool {
 		s.mu.Unlock()
 		return false
 	}
+}
+
+func selectionResult(version, offer uint64, followUp bool, err error) ResultMessage {
+	result := ResultMessage{Type: "result", Version: version, Offer: offer, OK: err == nil}
+	if err != nil {
+		result.Error = "selection rejected"
+		return result
+	}
+	if !followUp {
+		noFollowUp := false
+		result.FollowUp = &noFollowUp
+	}
+	return result
 }
 
 // Serve reads interface commands until EOF, an invalid message, or Close.
@@ -286,15 +315,11 @@ func (s *Service) Serve() error {
 			s.active = false
 			s.count = 0
 			s.mu.Unlock()
-			err := s.session.Select(parsed.version, parsed.offer, parsed.index)
+			followUp, err := s.session.Select(parsed.version, parsed.offer, parsed.index)
 			if err != nil {
 				s.Logger.Printf("event=select_error version=%d offer=%d index=%d err=%q", parsed.version, parsed.offer, parsed.index, err)
 			}
-			result := ResultMessage{Type: "result", Version: parsed.version, Offer: parsed.offer, OK: err == nil}
-			if err != nil {
-				result.Error = "selection rejected"
-			}
-			s.enqueue(result)
+			s.enqueue(selectionResult(parsed.version, parsed.offer, followUp, err))
 		case commandDismiss:
 			// The interface hides its own list; the next edit refreshes it.
 		case commandRefresh:

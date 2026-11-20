@@ -107,7 +107,8 @@ func (r *StoreRanker) Rank(context shellparse.Context, scope string, candidates 
 }
 
 func isParentPath(name string) bool {
-	return strings.TrimSuffix(strings.TrimSpace(name), "/") == ".."
+	trimmed := strings.TrimSuffix(strings.TrimSpace(name), "/")
+	return trimmed == ".." || strings.HasSuffix(trimmed, "/..")
 }
 
 // Record stores one explicit selection. Failures are ignored so a broken data

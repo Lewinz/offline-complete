@@ -19,6 +19,19 @@ func TestCandidatesSkipPureTraversalTokens(t *testing.T) {
 	}
 }
 
+func TestCandidatesSkipTokenEqualToPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".zsh_history")
+	data := "cd cmd/\ncd cmd/sub\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := Load(path)
+	got := store.Candidates("cmd/", 10)
+	if len(got) != 1 || got[0].Name != "cmd/sub" {
+		t.Fatalf("candidates = %#v", got)
+	}
+}
+
 func TestLoadParsesZshExtendedHistoryAndReturnsRecentCandidates(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".zsh_history")
 	if err := os.WriteFile(path, []byte(": 1700000000:0;git checkout feature\n: 1700000001:0;git status\n"), 0o600); err != nil {

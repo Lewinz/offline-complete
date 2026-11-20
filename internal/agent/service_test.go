@@ -13,6 +13,7 @@ import (
 
 	"offline-complete/internal/agent"
 	"offline-complete/internal/editstate"
+	"offline-complete/internal/generator"
 	"offline-complete/internal/rules"
 	"offline-complete/internal/shellparse"
 )
@@ -25,6 +26,7 @@ type wireMessage struct {
 	Index    int          `json:"index"`
 	Items    []agent.Item `json:"items"`
 	OK       bool         `json:"ok"`
+	FollowUp *bool        `json:"followUp"`
 	Error    string       `json:"error"`
 }
 
@@ -318,10 +320,9 @@ func TestServiceOffersNextPositionalAfterSelection(t *testing.T) {
 	if !service.Navigate(agent.NavigationAccept) {
 		t.Fatal("selection was not consumed")
 	}
-	if result := readWire(t, reader); result.Type != "result" || !result.OK {
+	if result := readWire(t, reader); result.Type != "result" || !result.OK || result.FollowUp != nil {
 		t.Fatalf("result = %+v", result)
 	}
-
 	// The selected positional value carries a trailing space, so the shell
 	// publishes the next argument slot and completion keeps prompting.
 	if err := state.Update(2, "tool value ", 11); err != nil {
@@ -368,7 +369,8 @@ func TestServiceDoesNotReofferVariadicPositionalValue(t *testing.T) {
 	if !service.Navigate(agent.NavigationAccept) {
 		t.Fatal("selection was not consumed")
 	}
-	if result := readWire(t, reader); result.Type != "result" || !result.OK {
+	if result := readWire(t, reader); result.Type != "result" || !result.OK ||
+		result.FollowUp == nil || *result.FollowUp {
 		t.Fatalf("result = %+v", result)
 	}
 	if err := state.Update(2, "tool value ", 11); err != nil {
@@ -659,5 +661,63 @@ func TestServiceRefreshForceRepublishesSameVersion(t *testing.T) {
 	offer := readWire(t, reader)
 	if offer.Type != "offer" || offer.Version != 1 || len(offer.Items) != 1 || offer.Items[0].Name != "alpha" {
 		t.Fatalf("forced offer = %+v", offer)
+	}
+}
+
+func TestServicePublishesAfterStaleRefreshOfSameLine(t *testing.T) {
+	pack := &rules.RulePack{SchemaVersion: 1, Commands: []rules.Command{{
+		Name: "tool",
+		Args: []rules.Arg{{
+			Suggestions: []rules.Candidate{{Name: "alpha"}},
+			Generators:  []rules.Generator{{Script: []string{"sleep", "0.2"}}},
+		}},
+	}}}
+	completer := &agent.Completer{
+		Pack:       pack,
+		Grammar:    map[string]shellparse.CommandSpec{"tool": {Positional: true}},
+		Generators: &generator.Runner{Timeout: 2 * time.Second},
+	}
+	state := &editstate.State{}
+	if err := state.Update(1, "tool ", 5); err != nil {
+		t.Fatal(err)
+	}
+	completion, err := agent.NewSession("session-1", state, completer, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	defer client.Close()
+	service, err := agent.NewService(completion, state, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	service.Refresh()
+	if offer := readWire(t, reader); offer.Type != "offer" || len(offer.Items) != 1 || offer.Items[0].Name != "alpha" {
+		t.Fatalf("initial offer = %+v", offer)
+	}
+
+	// Two identical lines with different versions: the first refresh is
+	// discarded because the shell moved on, and the second must still publish
+	// the empty result instead of being treated as an unchanged redraw.
+	if err := state.Update(2, "tool z", 6); err != nil {
+		t.Fatal(err)
+	}
+	staleDone := make(chan struct{})
+	go func() {
+		service.Refresh()
+		close(staleDone)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := state.Update(3, "tool z", 6); err != nil {
+		t.Fatal(err)
+	}
+	<-staleDone
+	service.Refresh()
+	if message := readWire(t, reader); message.Type != "clear" || message.Version != 3 {
+		t.Fatalf("message = %+v, want clear for version 3", message)
 	}
 }

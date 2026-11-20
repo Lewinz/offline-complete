@@ -235,14 +235,35 @@ func newAgentHooks(rulesPath string, args []string) (hooks runHooks, runtime *ag
 		return runHooks{}, nil, err
 	}
 
-	homeRC := filepath.Join(home, ".zshrc")
+	// The temporary ZDOTDIR only exists to load this generated rc. Restore the
+	// caller's value before sourcing the user's rc so child shells, caches and
+	// ${ZDOTDIR:-$HOME} lookups do not keep pointing at the session directory.
+	originalZDOTDIR := os.Getenv("ZDOTDIR")
+	rcDir := originalZDOTDIR
+	if rcDir == "" {
+		rcDir = home
+	}
+	homeRC := filepath.Join(rcDir, ".zshrc")
 	hooksFile := filepath.Join(tempDir, "hooks.zsh")
 	rcFile := filepath.Join(tempDir, ".zshrc")
 	homeLiteral, _ := shellparse.ZshLiteral(homeRC)
 	hooksLiteral, _ := shellparse.ZshLiteral(hooksFile)
-	zshrc := "source " + hooksLiteral + "\n"
+	restoreZDOTDIR := "unset ZDOTDIR\n"
+	if originalZDOTDIR != "" {
+		if literal, err := shellparse.ZshLiteral(originalZDOTDIR); err == nil {
+			restoreZDOTDIR = "ZDOTDIR=" + literal + "\n"
+		}
+	}
+	// macOS /etc/zshrc sets HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history before
+	// this file runs. With the temporary ZDOTDIR that points at a file which
+	// is deleted when the session ends, so restore the normal history path.
+	historyLiteral, _ := shellparse.ZshLiteral(filepath.Join(rcDir, ".zsh_history"))
+	initScript := restoreZDOTDIR +
+		"# Restore the history file that /etc/zshrc derived from the temporary ZDOTDIR.\n" +
+		"HISTFILE=" + historyLiteral + "\n"
+	zshrc := initScript + "source " + hooksLiteral + "\n"
 	if os.Getenv("OFFLINE_COMPLETE_NO_USER_RC") == "" {
-		zshrc = "[[ -f " + homeLiteral + " ]] && source " + homeLiteral + "\n" + zshrc
+		zshrc = initScript + "[[ -f " + homeLiteral + " ]] && source " + homeLiteral + "\n" + "source " + hooksLiteral + "\n"
 	}
 	if err := os.WriteFile(hooksFile, []byte(editstate.ZLETransportScript()), 0o600); err != nil {
 		_ = os.RemoveAll(tempDir)

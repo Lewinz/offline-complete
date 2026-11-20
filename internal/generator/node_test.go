@@ -109,6 +109,29 @@ func TestNodeRunnerKeepsFilepathGeneratorResultsWhileTyping(t *testing.T) {
 			t.Fatalf("prefix %q candidates = %#v, missing %q", tc.prefix, got, tc.want)
 		}
 	}
+
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"one", "two"} {
+		if err := os.Mkdir(filepath.Join(dir, "nested", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := runner.Complete(NodeRequest{
+		Source:  string(source),
+		Command: "cd",
+		Kind:    "positional",
+		Prefix:  "nested/",
+		CWD:     dir,
+		Tokens:  []string{"cd", "nested/"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].Name != "nested/one/" || got[1].Name != "nested/two/" || got[2].Name != "nested/../" {
+		t.Fatalf("nested candidates = %#v", got)
+	}
 }
 
 func TestNodeRunnerExecutesKiroGitGenerator(t *testing.T) {

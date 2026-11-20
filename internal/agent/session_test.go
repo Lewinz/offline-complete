@@ -28,13 +28,13 @@ func TestSessionOffersSelectsAndConsumesOnce(t *testing.T) {
 		t.Fatalf("offer = %+v id=%d ok=%v", offer, offerID, ok)
 	}
 
-	if err := session.Select(1, offerID, 0); err != nil {
+	if _, err := session.Select(1, offerID, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(writer.String(), "\x05\x15git commit") {
 		t.Fatalf("written = %q", writer.String())
 	}
-	if err := session.Select(1, offerID, 0); err == nil {
+	if _, err := session.Select(1, offerID, 0); err == nil {
 		t.Fatal("second select accepted")
 	}
 }
@@ -62,7 +62,7 @@ func TestSessionRejectsStaleAndUnfocusedSelections(t *testing.T) {
 	if _, _, ok := session.Refresh(true); !ok {
 		t.Fatal("second offer missing")
 	}
-	if err := session.Select(1, oldID, 0); err == nil {
+	if _, err := session.Select(1, oldID, 0); err == nil {
 		t.Fatal("stale offer accepted")
 	}
 
@@ -72,7 +72,7 @@ func TestSessionRejectsStaleAndUnfocusedSelections(t *testing.T) {
 	if _, _, ok := session.Refresh(false); ok {
 		t.Fatal("unfocused refresh produced an offer")
 	}
-	if err := session.Select(3, oldID, 0); err == nil {
+	if _, err := session.Select(3, oldID, 0); err == nil {
 		t.Fatal("unfocused selection accepted")
 	}
 	_ = oldOffer
@@ -143,7 +143,7 @@ func TestSessionReoffersTheSameVersionAfterRefocus(t *testing.T) {
 	if first.Version != second.Version || secondID == firstID {
 		t.Fatalf("first = %+v/%d, second = %+v/%d", first, firstID, second, secondID)
 	}
-	if err := session.Select(second.Version, secondID, 0); err != nil {
+	if _, err := session.Select(second.Version, secondID, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(writer.String(), "\x05\x15git commit") {
@@ -168,7 +168,7 @@ func TestSessionRecordsExplicitSelection(t *testing.T) {
 	if !ok {
 		t.Fatal("offer missing")
 	}
-	if err := session.Select(offer.Version, offerID, 0); err != nil {
+	if _, err := session.Select(offer.Version, offerID, 0); err != nil {
 		t.Fatal(err)
 	}
 	if recorder.candidate != "commit" || recorder.context.Command != "git" {
@@ -212,7 +212,7 @@ func TestSessionSeparatesFinishedPositionalValues(t *testing.T) {
 		if index < 0 {
 			t.Fatalf("%q: candidate %q missing from %+v", test.line, test.name, offer.Candidates)
 		}
-		if err := session.Select(1, offerID, index); err != nil {
+		if _, err := session.Select(1, offerID, index); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(writer.String(), test.want) {
@@ -262,8 +262,12 @@ func TestSessionSuppressesVariadicFollowUpOnlyForValues(t *testing.T) {
 		if index < 0 {
 			t.Fatalf("%q: candidate %q missing", test.line, test.name)
 		}
-		if err := session.Select(offer.Version, offerID, index); err != nil {
+		followUp, err := session.Select(offer.Version, offerID, index)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if followUp == test.suppressed {
+			t.Fatalf("%q: followUp = %v, want %v", test.line, followUp, !test.suppressed)
 		}
 		if session.ConsumeSuppressOffer(offer.Version, test.edited) {
 			t.Fatalf("%q: stale refresh consumed suppression", test.line)
@@ -298,7 +302,7 @@ func TestSessionSelectsInsertValue(t *testing.T) {
 	if !ok || len(offer.Candidates) != 1 {
 		t.Fatalf("offer = %+v ok=%v", offer, ok)
 	}
-	if err := session.Select(1, offerID, 0); err != nil {
+	if _, err := session.Select(1, offerID, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(writer.String(), "tool insert") {

@@ -85,6 +85,7 @@ func startTestAgent(t *testing.T, rulesJSON string) *testAgent {
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 
 	t.Setenv("HOME", root)
+	t.Setenv("ZDOTDIR", "")
 	t.Setenv("TERM", "xterm")
 	t.Setenv("OFFLINE_COMPLETE_NO_USER_RC", "1")
 	t.Setenv("OFFLINE_COMPLETE_SOCKET_BASE", filepath.Join(root, "b"))
@@ -386,6 +387,71 @@ func TestAgentUpAtFirstCandidateRecallsHistory(t *testing.T) {
 	}
 }
 
+func TestAgentRestoresUserZDOTDIRAndHistory(t *testing.T) {
+	const rulesJSON = `{"schemaVersion":1,"commands":[{"name":"git"}]}`
+	a := startTestAgent(t, rulesJSON)
+	home := os.Getenv("HOME")
+
+	run := func(line string) {
+		if _, err := a.stdin.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+		a.waitState(t, line, len(line))
+		if _, err := a.stdin.Write([]byte("\r")); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			snapshot, present := a.runtime.state.Snapshot()
+			if !present || snapshot.Line == "" {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("line %q did not run; state %+v present=%v output %q", line, snapshot, present, a.output.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	run("echo history-marker-xyz")
+	run(`print -r -- "${ZDOTDIR-unset}" > "$HOME/zdotdir.txt"; print -r -- "$HISTFILE" > "$HOME/histfile.txt"; print -r -- ready > "$HOME/ready.txt"`)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(home, "ready.txt")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("setup command did not finish; output %q", a.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if data, err := os.ReadFile(filepath.Join(home, "zdotdir.txt")); err != nil {
+		t.Fatal(err)
+	} else if got := strings.TrimSpace(string(data)); got != "unset" {
+		t.Fatalf("ZDOTDIR = %q, want unset", got)
+	}
+	wantHistory := filepath.Join(home, ".zsh_history")
+	if data, err := os.ReadFile(filepath.Join(home, "histfile.txt")); err != nil {
+		t.Fatal(err)
+	} else if got := strings.TrimSpace(string(data)); got != wantHistory {
+		t.Fatalf("HISTFILE = %q, want %q", got, wantHistory)
+	}
+
+	outcome := a.stop(t)
+	if outcome.err != nil || outcome.code != 0 {
+		t.Fatalf("agent exit: %+v; output %q", outcome, a.output.String())
+	}
+	data, err := os.ReadFile(wantHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "echo history-marker-xyz") {
+		t.Fatalf("history %q does not contain the submitted command", data)
+	}
+}
+
 func TestAgentPositionalSelectionContinues(t *testing.T) {
 	const rulesJSON = `{"schemaVersion":1,"commands":[{"name":"tool","args":[{"name":"first","suggestions":[{"name":"value"}]},{"name":"second","suggestions":[{"name":"next"}]}]}]}`
 	a := startTestAgent(t, rulesJSON)
@@ -531,5 +597,52 @@ func TestPresenceAlive(t *testing.T) {
 	}
 	if presenceAlive(path) {
 		t.Fatal("invalid pid is alive")
+	}
+}
+
+func TestAgentBracketedPasteRefreshesOffer(t *testing.T) {
+	const rulesJSON = `{"schemaVersion":1,"commands":[{"name":"git","subcommands":[{"name":"commit","description":"Record changes"},{"name":"checkout","description":"Switch branches"}]}]}`
+	a := startTestAgent(t, rulesJSON)
+
+	if _, err := a.stdin.Write([]byte("git ")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := a.waitState(t, "git ", 4)
+	var offer agentMessage
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		message := readAgentMessage(t, a.connection, a.reader, time.Until(deadline))
+		if message.Type == "offer" && message.Version == snapshot.Version {
+			offer = message
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no offer before paste, last %+v", message)
+		}
+	}
+	if len(offer.Items) != 2 {
+		t.Fatalf("offer = %+v", offer)
+	}
+
+	if _, err := a.stdin.Write([]byte("\x1b[200~ch\x1b[201~")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = a.waitState(t, "git ch", 6)
+	for {
+		message := readAgentMessage(t, a.connection, a.reader, time.Until(deadline))
+		if message.Type == "offer" && message.Version == snapshot.Version {
+			if len(message.Items) != 1 || message.Items[0].Name != "checkout" {
+				t.Fatalf("offer after paste = %+v", message)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no refreshed offer after paste, last %+v", message)
+		}
+	}
+
+	outcome := a.stop(t)
+	if outcome.err != nil || outcome.code != 0 {
+		t.Fatalf("agent exit: %+v; output %q", outcome, a.output.String())
 	}
 }
